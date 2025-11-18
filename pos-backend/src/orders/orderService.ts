@@ -641,16 +641,52 @@ export const finalizeOrder = async (
       );
     }
 
+    // Recalculate order totals to ensure they're up-to-date before finalizing
+    const items = await tx.orderItem.findMany({
+      where: { orderId },
+    });
+
+    const subtotal = items.reduce(
+      (sum, item) => sum.add(item.lineSubtotal),
+      ZERO
+    );
+
+    const itemDiscount = items.reduce(
+      (sum, item) => sum.add(item.lineDiscountTotal),
+      ZERO
+    );
+
+    const discountAggregate = await tx.orderDiscount.aggregate({
+      where: { orderId },
+      _sum: { amount: true },
+    });
+
+    const orderDiscount =
+      discountAggregate._sum.amount !== null &&
+      discountAggregate._sum.amount !== undefined
+        ? money(discountAggregate._sum.amount)
+        : ZERO;
+    const discountTotal = itemDiscount.add(orderDiscount);
+    const totalDue = subtotal.sub(discountTotal);
+
+    // Update order with recalculated totals
+    await tx.order.update({
+      where: { id: orderId },
+      data: {
+        subtotal,
+        discountTotal,
+        totalDue,
+      },
+    });
+
     const inventoryAdjustments = await collectInventoryAdjustments(
       tx,
-      order.items,
+      items,
       -1
     );
 
     const { entries, totalApplied, totalTendered } =
       await prepareFinalizePayments(tx, input.payments);
-
-    const totalDue = money(order.totalDue);
 
     if (totalApplied.lessThan(totalDue)) {
       throw new HttpError(
