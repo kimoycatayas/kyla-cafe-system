@@ -31,33 +31,32 @@ export function RoleProtectedRoute({
     const token = authStorage.getAccessToken();
     const user = authStorage.getUser();
 
+    let shouldAuthorize = true;
+    let redirectPath: string | null = null;
+
     if (!token) {
-      setIsAuthorized(false);
-      router.replace(fallbackPath);
-      return;
-    }
-
-    // Cashiers can only access sales-processing page
-    if (user?.role === "CASHIER") {
+      shouldAuthorize = false;
+      redirectPath = fallbackPath;
+    } else if (user?.role === "CASHIER") {
+      // Cashiers can only access sales-processing page
       if (pathname !== "/sales-processing") {
-        setIsAuthorized(false);
-        router.replace("/sales-processing");
-        return;
+        shouldAuthorize = false;
+        redirectPath = "/sales-processing";
       }
-      setIsAuthorized(true);
-      return;
-    }
-
-    // For other roles, check if they have the required role
-    if (allowedRoles && user?.role) {
+    } else if (allowedRoles && user?.role) {
+      // For other roles, check if they have the required role
       if (!allowedRoles.includes(user.role)) {
-        setIsAuthorized(false);
-        router.replace(fallbackPath);
-        return;
+        shouldAuthorize = false;
+        redirectPath = fallbackPath;
       }
     }
 
-    setIsAuthorized(true);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setIsAuthorized(shouldAuthorize);
+
+    if (redirectPath) {
+      router.replace(redirectPath);
+    }
   }, [pathname, allowedRoles, fallbackPath, router]);
 
   if (isAuthorized === null) {

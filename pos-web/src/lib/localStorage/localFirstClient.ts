@@ -8,7 +8,7 @@ import { addToSyncQueue } from "./syncQueue";
 import { apiRequest } from "../apiClient";
 import { isOnline } from "./syncManager";
 import type { Product } from "../productClient";
-import type { Order, OrderItem, OrderSummary, CheckoutConfig, FinalizeOrderPayload, FinalizeOrderResult } from "../orderClient";
+import type { Order, OrderItem, OrderSummary, CheckoutConfig, FinalizeOrderPayload, FinalizeOrderResult, OrderStatus } from "../orderClient";
 import type { InventoryItem } from "../inventoryClient";
 
 // Product operations
@@ -57,7 +57,7 @@ export async function fetchOrdersLocalFirst(): Promise<Order[]> {
 }
 
 export async function createOrderLocalFirst(
-  payload: { cashierId: string; orderNumber?: string; status?: string }
+  payload: { cashierId: string; orderNumber?: string; status?: OrderStatus }
 ): Promise<Order> {
   // Generate temporary ID for optimistic update
   const tempId = `temp-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
@@ -182,7 +182,7 @@ export async function fetchInventoryLocalFirst(): Promise<InventoryItem[]> {
 
 // Checkout config
 export async function fetchCheckoutConfigLocalFirst(): Promise<CheckoutConfig> {
-  const localConfig = await get<CheckoutConfig>("checkoutConfig", "default");
+  const localConfig = await get<CheckoutConfig & { id: string }>("checkoutConfig", "default");
 
   if (isOnline()) {
     try {
@@ -194,14 +194,16 @@ export async function fetchCheckoutConfigLocalFirst(): Promise<CheckoutConfig> {
     } catch (error) {
       console.warn("Failed to sync config from server, using local cache", error);
       if (localConfig) {
-        return localConfig;
+        const { id, ...config } = localConfig;
+        return config;
       }
       throw error;
     }
   }
 
   if (localConfig) {
-    return localConfig;
+    const { id, ...config } = localConfig;
+    return config;
   }
 
   throw new Error("Checkout config not available offline");

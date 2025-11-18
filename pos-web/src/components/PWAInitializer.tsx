@@ -2,7 +2,7 @@
 
 import { useEffect } from "react";
 import { registerServiceWorker } from "@/lib/pwa/registerServiceWorker";
-import { startSyncManager } from "@/lib/localStorage/syncManager";
+import { startSyncManager, stopSyncManager } from "@/lib/localStorage/syncManager";
 
 export function PWAInitializer() {
   useEffect(() => {
@@ -14,7 +14,6 @@ export function PWAInitializer() {
 
     return () => {
       // Cleanup if needed
-      const { stopSyncManager } = require("@/lib/localStorage/syncManager");
       stopSyncManager();
     };
   }, []);

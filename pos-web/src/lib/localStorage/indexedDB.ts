@@ -193,7 +193,7 @@ export async function clear(storeName: StoreName): Promise<void> {
 export async function queryByIndex<T>(
   storeName: StoreName,
   indexName: string,
-  value: unknown
+  value: IDBValidKey | IDBKeyRange | null | undefined
 ): Promise<T[]> {
   const db = await openDB();
   return new Promise((resolve, reject) => {

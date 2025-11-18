@@ -1080,7 +1080,7 @@ export default function SalesProcessingPage() {
                             >
                               −
                             </button>
-                            <span className="min-w-[2rem] text-center text-xs font-semibold text-slate-700">
+                            <span className="min-w-8 text-center text-xs font-semibold text-slate-700">
                               {item.qty}
                             </span>
                             <button
