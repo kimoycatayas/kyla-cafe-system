@@ -8,7 +8,15 @@ import { addToSyncQueue } from "./syncQueue";
 import { apiRequest } from "../apiClient";
 import { isOnline } from "./syncManager";
 import type { Product } from "../productClient";
-import type { Order, OrderItem, OrderSummary, CheckoutConfig, FinalizeOrderPayload, FinalizeOrderResult, OrderStatus } from "../orderClient";
+import type {
+  Order,
+  OrderItem,
+  OrderSummary,
+  CheckoutConfig,
+  FinalizeOrderPayload,
+  FinalizeOrderResult,
+  OrderStatus,
+} from "../orderClient";
 import type { InventoryItem } from "../inventoryClient";
 
 // Product operations
@@ -21,13 +29,16 @@ export async function fetchProductsLocalFirst(): Promise<Product[]> {
     try {
       const { fetchProducts } = await import("../productClient");
       const serverProducts = await fetchProducts();
-      
+
       // Update local cache
       await putMany("products", serverProducts);
-      
+
       return serverProducts;
     } catch (error) {
-      console.warn("Failed to sync products from server, using local cache", error);
+      console.warn(
+        "Failed to sync products from server, using local cache",
+        error
+      );
       // Return local data if sync fails
       return localProducts;
     }
@@ -44,11 +55,14 @@ export async function fetchOrdersLocalFirst(): Promise<Order[]> {
     try {
       const { fetchOrders } = await import("../orderClient");
       const serverOrders = await fetchOrders();
-      
+
       await putMany("orders", serverOrders);
       return serverOrders;
     } catch (error) {
-      console.warn("Failed to sync orders from server, using local cache", error);
+      console.warn(
+        "Failed to sync orders from server, using local cache",
+        error
+      );
       return localOrders;
     }
   }
@@ -56,11 +70,15 @@ export async function fetchOrdersLocalFirst(): Promise<Order[]> {
   return localOrders;
 }
 
-export async function createOrderLocalFirst(
-  payload: { cashierId: string; orderNumber?: string; status?: OrderStatus }
-): Promise<Order> {
+export async function createOrderLocalFirst(payload: {
+  cashierId: string;
+  orderNumber?: string;
+  status?: OrderStatus;
+}): Promise<Order> {
   // Generate temporary ID for optimistic update
-  const tempId = `temp-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  const tempId = `temp-${Date.now()}-${Math.random()
+    .toString(36)
+    .substr(2, 9)}`;
   const tempOrderNumber = payload.orderNumber || `ORD-${Date.now()}`;
 
   const optimisticOrder: Order = {
@@ -96,7 +114,7 @@ export async function createOrderLocalFirst(
     try {
       const { createOrder } = await import("../orderClient");
       const serverOrder = await createOrder(payload);
-      
+
       // Replace optimistic order with real one
       try {
         await remove("orders", tempId);
@@ -104,7 +122,7 @@ export async function createOrderLocalFirst(
         // Ignore if temp order doesn't exist
       }
       await put("orders", serverOrder);
-      
+
       return serverOrder;
     } catch (error) {
       console.warn("Failed to create order on server, will retry later", error);
@@ -147,13 +165,15 @@ export async function getOrderSummaryLocalFirst(
     try {
       const { getOrderSummary } = await import("../orderClient");
       const summary = await getOrderSummary(orderId);
-      
+
       // Update local cache
       await put("orders", summary.order);
-      
+
       return summary;
     } catch (error) {
-      throw new Error("Order not found locally and unable to fetch from server");
+      throw new Error(
+        "Order not found locally and unable to fetch from server"
+      );
     }
   }
 
@@ -162,37 +182,62 @@ export async function getOrderSummaryLocalFirst(
 
 // Inventory operations
 export async function fetchInventoryLocalFirst(): Promise<InventoryItem[]> {
-  const localInventory = await getAll<InventoryItem>("inventory");
+  const localInventory = await getAll<InventoryItem & { productId?: string }>(
+    "inventory"
+  );
 
   if (isOnline()) {
     try {
       const { fetchInventory } = await import("../inventoryClient");
       const serverInventory = await fetchInventory();
-      
-      await putMany("inventory", serverInventory);
+
+      // Add productId field for IndexedDB keyPath (productId is the keyPath in the store)
+      const inventoryWithProductId = serverInventory.map((item) => ({
+        ...item,
+        productId: item.product.id,
+      }));
+
+      await putMany("inventory", inventoryWithProductId);
       return serverInventory;
     } catch (error) {
-      console.warn("Failed to sync inventory from server, using local cache", error);
-      return localInventory;
+      console.warn(
+        "Failed to sync inventory from server, using local cache",
+        error
+      );
+      return localInventory.map((item) => {
+        // Remove productId from local items before returning (to match API response format)
+        const { productId, ...rest } = item;
+        return rest as InventoryItem;
+      });
     }
   }
 
-  return localInventory;
+  return localInventory.map((item) => {
+    // Remove productId from local items before returning (to match API response format)
+    const { productId, ...rest } = item;
+    return rest as InventoryItem;
+  });
 }
 
 // Checkout config
 export async function fetchCheckoutConfigLocalFirst(): Promise<CheckoutConfig> {
-  const localConfig = await get<CheckoutConfig & { id: string }>("checkoutConfig", "default");
+  const localConfig = await get<CheckoutConfig & { id: string }>(
+    "checkoutConfig",
+    "default"
+  );
 
   if (isOnline()) {
     try {
       const { fetchCheckoutConfig } = await import("../orderClient");
       const serverConfig = await fetchCheckoutConfig();
-      
+
       await put("checkoutConfig", { ...serverConfig, id: "default" });
       return serverConfig;
     } catch (error) {
-      console.warn("Failed to sync config from server, using local cache", error);
+      console.warn(
+        "Failed to sync config from server, using local cache",
+        error
+      );
       if (localConfig) {
         const { id, ...config } = localConfig;
         return config;
@@ -233,7 +278,9 @@ export async function addOrderItemLocalFirst(
   const lineTotal = lineSubtotal - lineDiscountTotal;
 
   // Create optimistic item
-  const tempItemId = `temp-item-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  const tempItemId = `temp-item-${Date.now()}-${Math.random()
+    .toString(36)
+    .substr(2, 9)}`;
   const newItem: OrderItem = {
     id: tempItemId,
     orderId,
@@ -314,7 +361,8 @@ export async function updateOrderItemLocalFirst(
   // Update item optimistically
   const updatedItem: OrderItem = {
     ...item,
-    productId: payload.productId !== undefined ? payload.productId : item.productId,
+    productId:
+      payload.productId !== undefined ? payload.productId : item.productId,
     nameSnapshot: payload.nameSnapshot ?? item.nameSnapshot,
     notes: payload.notes !== undefined ? payload.notes : item.notes,
     qty: updatedQty,
@@ -326,8 +374,11 @@ export async function updateOrderItemLocalFirst(
 
   // Recalculate order totals
   const otherItems = order.items.filter((i) => i.id !== itemId);
-  const newSubtotal = otherItems.reduce((sum, i) => sum + i.lineSubtotal, 0) + lineSubtotal;
-  const newDiscountTotal = otherItems.reduce((sum, i) => sum + i.lineDiscountTotal, 0) + updatedDiscount;
+  const newSubtotal =
+    otherItems.reduce((sum, i) => sum + i.lineSubtotal, 0) + lineSubtotal;
+  const newDiscountTotal =
+    otherItems.reduce((sum, i) => sum + i.lineDiscountTotal, 0) +
+    updatedDiscount;
   const newTotalDue = newSubtotal - newDiscountTotal;
 
   const updatedOrder: Order = {
@@ -380,8 +431,14 @@ export async function removeOrderItemLocalFirst(
 
   // Update order optimistically
   const remainingItems = order.items.filter((i) => i.id !== itemId);
-  const newSubtotal = remainingItems.reduce((sum, i) => sum + i.lineSubtotal, 0);
-  const newDiscountTotal = remainingItems.reduce((sum, i) => sum + i.lineDiscountTotal, 0);
+  const newSubtotal = remainingItems.reduce(
+    (sum, i) => sum + i.lineSubtotal,
+    0
+  );
+  const newDiscountTotal = remainingItems.reduce(
+    (sum, i) => sum + i.lineDiscountTotal,
+    0
+  );
   const newTotalDue = newSubtotal - newDiscountTotal;
 
   const updatedOrder: Order = {
@@ -439,23 +496,26 @@ export async function finalizeOrderLocalFirst(
     try {
       const { finalizeOrder, getOrderReceipt } = await import("../orderClient");
       const result = await finalizeOrder(orderId, payload);
-      
+
       // Update local cache
       await put("orders", result.order);
-      
+
       return result;
     } catch (error) {
-      console.warn("Failed to finalize order on server, will retry later", error);
+      console.warn(
+        "Failed to finalize order on server, will retry later",
+        error
+      );
       throw error; // Don't allow finalizing offline (payment needs server confirmation)
     }
   }
 
-  throw new Error("Cannot finalize order while offline. Please connect to the internet.");
+  throw new Error(
+    "Cannot finalize order while offline. Please connect to the internet."
+  );
 }
 
-export async function voidOrderLocalFirst(
-  orderId: string
-): Promise<Order> {
+export async function voidOrderLocalFirst(orderId: string): Promise<Order> {
   const order = await get<Order>("orders", orderId);
   if (!order) {
     throw new Error("Order not found");
@@ -494,4 +554,3 @@ export async function voidOrderLocalFirst(
 
   return updatedOrder;
 }
-
