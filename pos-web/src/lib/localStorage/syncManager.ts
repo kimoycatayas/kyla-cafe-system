@@ -89,4 +89,3 @@ export function stopSyncManager(): void {
     syncInterval = null;
   }
 }
-

@@ -6,11 +6,7 @@ const CACHE_NAME = "kyla-pos-v1";
 const STATIC_CACHE_NAME = "kyla-pos-static-v1";
 
 // Assets to cache on install
-const STATIC_ASSETS = [
-  "/",
-  "/manifest.json",
-  "/kyla-cafe-system-logo.png",
-];
+const STATIC_ASSETS = ["/", "/manifest.json", "/kyla-cafe-system-logo.png"];
 
 // Install event - cache static assets
 self.addEventListener("install", (event) => {
@@ -86,4 +82,3 @@ self.addEventListener("sync", (event) => {
     );
   }
 });
-

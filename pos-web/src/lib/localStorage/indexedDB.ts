@@ -38,7 +38,9 @@ export async function openDB(): Promise<IDBDatabase> {
 
       // Products store
       if (!db.objectStoreNames.contains("products")) {
-        const productsStore = db.createObjectStore("products", { keyPath: "id" });
+        const productsStore = db.createObjectStore("products", {
+          keyPath: "id",
+        });
         productsStore.createIndex("sku", "sku", { unique: false });
         productsStore.createIndex("updatedAt", "updatedAt", { unique: false });
       }
@@ -46,7 +48,9 @@ export async function openDB(): Promise<IDBDatabase> {
       // Orders store
       if (!db.objectStoreNames.contains("orders")) {
         const ordersStore = db.createObjectStore("orders", { keyPath: "id" });
-        ordersStore.createIndex("orderNumber", "orderNumber", { unique: false });
+        ordersStore.createIndex("orderNumber", "orderNumber", {
+          unique: false,
+        });
         ordersStore.createIndex("status", "status", { unique: false });
         ordersStore.createIndex("createdAt", "createdAt", { unique: false });
         ordersStore.createIndex("cashierId", "cashierId", { unique: false });
@@ -219,4 +223,3 @@ export async function queryRange<T>(
     request.onerror = () => reject(request.error);
   });
 }
-
