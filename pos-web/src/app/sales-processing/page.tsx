@@ -73,6 +73,7 @@ export default function SalesProcessingPage() {
     orderNumber: string;
   } | null>(null);
   const dropdownRef = useRef<HTMLDivElement | null>(null);
+  const mobileDropdownRef = useRef<HTMLDivElement | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
   const [inventoryQuantities, setInventoryQuantities] = useState<
     Record<string, number>
@@ -510,20 +511,32 @@ export default function SalesProcessingPage() {
 
   const handleAdjustQuantity = async (item: OrderItem, delta: number) => {
     const context = ensureActiveOrder();
-    if (!context) return;
+    if (!context || !activeOrder) return;
 
-    const nextQtyRaw = item.qty + delta;
+    // Find all items in the same group (same productId or nameSnapshot)
+    const groupKey = item.productId ?? `name:${item.nameSnapshot}`;
+    const groupedItems = activeOrder.items.filter(
+      (i) => (i.productId ?? `name:${i.nameSnapshot}`) === groupKey
+    );
+
+    // Calculate total current quantity for the group
+    const currentTotalQty = groupedItems.reduce((sum, i) => sum + i.qty, 0);
+    const nextQtyRaw = currentTotalQty + delta;
+
     if (nextQtyRaw <= 0) {
+      // Remove all items in the group
       await handleRemoveItem(item);
       return;
     }
 
+    // Calculate how to distribute the new quantity
+    // We'll update the first item with the new total quantity and remove the rest
     let targetQty = nextQtyRaw;
     if (item.productId) {
       const baseQuantity = inventoryQuantities[item.productId];
       if (typeof baseQuantity === "number") {
         const committed = orderItemQuantitiesRef.current[item.productId] ?? 0;
-        const otherQty = committed - item.qty;
+        const otherQty = committed - currentTotalQty;
         const maxAllowed = Math.max(baseQuantity - otherQty, 0);
         targetQty = Math.min(targetQty, maxAllowed);
       }
@@ -534,7 +547,7 @@ export default function SalesProcessingPage() {
       return;
     }
 
-    if (targetQty === item.qty) {
+    if (targetQty === currentTotalQty) {
       setFeedbackMessage("No additional stock available for this item.");
       return;
     }
@@ -544,9 +557,17 @@ export default function SalesProcessingPage() {
     clearMessages();
     setIsProcessing(true);
     try {
+      // Update the first item with the new total quantity
       await updateOrderItemLocalFirst(context.order.id, item.id, {
         qty: targetQty,
       });
+
+      // Remove all other items in the group
+      const otherItems = groupedItems.filter((i) => i.id !== item.id);
+      for (const otherItem of otherItems) {
+        await removeOrderItemLocalFirst(context.order.id, otherItem.id);
+      }
+
       updateOrderQuantity(item.productId, () => targetQty);
       await refreshSummary(context.order.id, paymentForm.method);
       setFeedbackMessage("Item quantity updated.");
@@ -561,14 +582,23 @@ export default function SalesProcessingPage() {
 
   const handleRemoveItem = async (item: OrderItem) => {
     const context = ensureActiveOrder();
-    if (!context) return;
+    if (!context || !activeOrder) return;
+
+    // Find all items in the same group (same productId or nameSnapshot)
+    const groupKey = item.productId ?? `name:${item.nameSnapshot}`;
+    const groupedItems = activeOrder.items.filter(
+      (i) => (i.productId ?? `name:${i.nameSnapshot}`) === groupKey
+    );
 
     await flushPendingProductAdds();
 
     clearMessages();
     setIsProcessing(true);
     try {
-      await removeOrderItemLocalFirst(context.order.id, item.id);
+      // Remove all items in the group
+      for (const groupItem of groupedItems) {
+        await removeOrderItemLocalFirst(context.order.id, groupItem.id);
+      }
       await refreshSummary(context.order.id, paymentForm.method);
       setFeedbackMessage(`${item.nameSnapshot} removed from the order.`);
     } catch (err) {
@@ -715,11 +745,18 @@ export default function SalesProcessingPage() {
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
-      if (!dropdownRef.current) {
-        return;
-      }
+      const target = event.target as Node;
+      const isOutsideDesktop =
+        dropdownRef.current && !dropdownRef.current.contains(target);
+      const isOutsideMobile =
+        mobileDropdownRef.current &&
+        !mobileDropdownRef.current.contains(target);
 
-      if (!dropdownRef.current.contains(event.target as Node)) {
+      // Close if clicking outside both dropdowns (or if one doesn't exist, check the other)
+      if (
+        (!dropdownRef.current || isOutsideDesktop) &&
+        (!mobileDropdownRef.current || isOutsideMobile)
+      ) {
         setIsDropdownOpen(false);
       }
     };
@@ -801,65 +838,113 @@ export default function SalesProcessingPage() {
 
   return (
     <ProtectedRoute>
-      <div className="min-h-screen bg-slate-50">
+      <div className="min-h-screen bg-slate-50 overflow-x-hidden">
         <header className="border-b border-slate-200 bg-white">
-          <div className="flex w-full items-center justify-between gap-4 px-6 py-4">
-            {/* Left: Logo and Title */}
-            <div className="flex items-center gap-4">
-              <Logo
-                href="/sales-processing"
-                size={60}
-                showText={false}
-                imageClassName="w-auto h-auto"
-                className="shrink-0"
-              />
-              <div>
-                <h1 className="text-xl font-semibold text-slate-900">
-                  Checkout
-                </h1>
+          <div className="flex w-full flex-col gap-3 px-3 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4 sm:px-6 sm:py-4">
+            {/* Top Row: Logo and Title */}
+            <div className="flex items-center justify-between gap-2 sm:gap-4">
+              <div className="flex items-center gap-2 sm:gap-4">
+                <Logo
+                  href="/sales-processing"
+                  size={60}
+                  showText={false}
+                  imageClassName="w-auto h-auto"
+                  className="shrink-0"
+                />
+                <div>
+                  <h1 className="text-lg font-semibold text-slate-900 sm:text-xl">
+                    Checkout
+                  </h1>
+                </div>
+              </div>
+
+              {/* Mobile: User Menu */}
+              <div className="relative sm:hidden" ref={mobileDropdownRef}>
+                <button
+                  type="button"
+                  onClick={() => setIsDropdownOpen((prev) => !prev)}
+                  aria-haspopup="menu"
+                  aria-expanded={isDropdownOpen}
+                  className="flex h-9 w-9 items-center justify-center rounded-full bg-slate-900 text-xs font-semibold uppercase tracking-wide text-white transition hover:bg-slate-800"
+                >
+                  {profileInitials}
+                </button>
+                {isDropdownOpen ? (
+                  <div className="absolute right-0 top-12 z-20 w-48 rounded-lg border border-slate-200 bg-white p-1 shadow-lg">
+                    <button
+                      type="button"
+                      onClick={handleOpenSettings}
+                      className="w-full rounded-md px-3 py-2 text-left text-sm font-medium text-slate-700 transition hover:bg-slate-100"
+                    >
+                      User settings
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleExpireToken}
+                      disabled={isExpiringToken || !user}
+                      className="mt-1 w-full rounded-md px-3 py-2 text-left text-sm font-medium text-amber-600 transition hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {isExpiringToken ? "Expiring…" : "Expire access token"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleLogout}
+                      disabled={isLoggingOut}
+                      className="mt-1 w-full rounded-md px-3 py-2 text-left text-sm font-medium text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {isLoggingOut ? "Signing out…" : "Logout"}
+                    </button>
+                  </div>
+                ) : null}
               </div>
             </div>
 
-            {/* Center: Order Info */}
-            {activeOrder && (
-              <div className="flex items-center gap-3">
-                <span
-                  className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                    statusStyles[activeOrder.status]
-                  }`}
-                >
-                  {activeOrder.orderNumber}
-                </span>
-                <button
-                  type="button"
-                  onClick={handleRefreshSummary}
-                  disabled={isProcessing}
-                  className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  Refresh
-                </button>
-                <button
-                  type="button"
-                  onClick={handleVoidOrder}
-                  disabled={
-                    isProcessing ||
-                    !activeOrder ||
-                    activeOrder.status !== "OPEN"
-                  }
-                  className="rounded-lg border border-rose-300 bg-white px-3 py-1.5 text-xs font-semibold text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  Void
-                </button>
-              </div>
-            )}
+            {/* Second Row: Order Info and Actions */}
+            <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+              {/* Order Info */}
+              {activeOrder && (
+                <>
+                  <span
+                    className={`rounded-full px-2 py-1 text-xs font-semibold sm:px-3 ${
+                      statusStyles[activeOrder.status]
+                    }`}
+                  >
+                    <span className="hidden sm:inline">
+                      {activeOrder.orderNumber}
+                    </span>
+                    <span className="sm:hidden">
+                      {activeOrder.orderNumber.split("-")[1]}
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleRefreshSummary}
+                    disabled={isProcessing}
+                    className="rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 sm:px-3"
+                  >
+                    Refresh
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleVoidOrder}
+                    disabled={
+                      isProcessing ||
+                      !activeOrder ||
+                      activeOrder.status !== "OPEN"
+                    }
+                    className="rounded-lg border border-rose-300 bg-white px-2 py-1.5 text-xs font-semibold text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60 sm:px-3"
+                  >
+                    Void
+                  </button>
+                </>
+              )}
 
-            {/* Right: Actions and User */}
-            <div className="flex items-center gap-3">
+              {/* Actions */}
               <button
                 type="button"
                 onClick={handleCreateOrder}
                 disabled={isProcessing || !user}
-                className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-70"
+                className="rounded-lg bg-sky-600 px-3 py-2 text-xs font-semibold text-white transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-70 sm:px-4 sm:text-sm"
               >
                 {isProcessing ? "Working…" : "New Order"}
               </button>
@@ -867,23 +952,25 @@ export default function SalesProcessingPage() {
                 <>
                   <Link
                     href="/orders"
-                    className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                    className="hidden rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 sm:block sm:px-4 sm:text-sm"
                   >
                     Orders
                   </Link>
                   <Link
                     href="/dashboard"
-                    className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                    className="hidden rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 sm:block sm:px-4 sm:text-sm"
                   >
                     Dashboard
                   </Link>
                 </>
               )}
+
+              {/* Desktop: User Menu */}
               <div
-                className="relative flex items-center gap-2"
+                className="relative hidden items-center gap-2 sm:flex"
                 ref={dropdownRef}
               >
-                <div className="hidden text-right sm:block">
+                <div className="text-right">
                   <p className="text-sm font-medium text-slate-900">
                     {displayName}
                   </p>
@@ -930,7 +1017,7 @@ export default function SalesProcessingPage() {
           </div>
         </header>
 
-        <main className="flex h-[calc(100vh-80px)] gap-4 overflow-hidden px-6 py-4">
+        <main className="flex flex-col gap-4 px-3 py-4 sm:flex-row sm:min-h-[calc(100vh-80px)] sm:px-6">
           {tokenNotice ? (
             <div
               className={`absolute left-1/2 top-20 z-50 -translate-x-1/2 rounded-2xl border px-4 py-3 text-sm font-medium ${
@@ -954,8 +1041,8 @@ export default function SalesProcessingPage() {
           ) : null}
 
           {/* Products Section - Left (70%) */}
-          <div className="flex w-[70%] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-            <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
+          <div className="flex w-full flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm sm:w-[70%]">
+            <div className="border-b border-slate-200 bg-slate-50 px-4 py-3 sm:px-6 sm:py-4">
               <div>
                 <h2 className="text-lg font-semibold text-slate-900">
                   Products
@@ -970,7 +1057,7 @@ export default function SalesProcessingPage() {
               </div>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-6">
+            <div className="flex-1 overflow-y-auto p-3 sm:p-6">
               {isLoading ? (
                 <div className="flex items-center justify-center rounded-xl border border-dashed border-slate-200 px-4 py-12 text-sm text-slate-500">
                   Loading products…
@@ -980,7 +1067,7 @@ export default function SalesProcessingPage() {
                   Products will appear here once added in Product Management.
                 </div>
               ) : (
-                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-2 sm:gap-4 lg:grid-cols-3 xl:grid-cols-4">
                   {products.map((product) => {
                     const queuedCount = pendingProductAdds[product.id] ?? 0;
                     const stockLevel = getRemainingStock(product.id);
@@ -991,7 +1078,7 @@ export default function SalesProcessingPage() {
                         type="button"
                         onClick={() => handleAddProduct(product)}
                         disabled={!activeOrder || isOutOfStock}
-                        className="group flex flex-col gap-2 rounded-xl border border-slate-200 bg-white p-4 text-left shadow-sm transition-all hover:-translate-y-1 hover:border-sky-300 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0"
+                        className="group flex flex-col gap-2 rounded-xl border border-slate-200 bg-white p-3 text-left shadow-sm transition-all hover:-translate-y-1 hover:border-sky-300 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0 sm:p-4"
                       >
                         <div className="flex items-start justify-between gap-2">
                           <div className="flex-1">
@@ -1035,9 +1122,9 @@ export default function SalesProcessingPage() {
           </div>
 
           {/* Cart & Checkout Section - Right (30%) */}
-          <div className="flex w-[30%] flex-col gap-4 overflow-hidden">
-            <div className="flex flex-1 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-              <div className="border-b border-slate-200 bg-slate-50 px-4 py-3">
+          <div className="flex w-full flex-col gap-4 sm:w-[30%]">
+            <div className="flex flex-col rounded-2xl border border-slate-200 bg-white shadow-sm">
+              <div className="border-b border-slate-200 bg-slate-50 px-3 py-2 sm:px-4 sm:py-3">
                 <h2 className="text-lg font-semibold text-slate-900">
                   Current Cart
                 </h2>
@@ -1046,7 +1133,7 @@ export default function SalesProcessingPage() {
                 </p>
               </div>
 
-              <div className="flex-1 overflow-y-auto p-4">
+              <div className="p-3 sm:p-4">
                 {isLoading ? (
                   <div className="flex items-center justify-center rounded-xl border border-dashed border-slate-200 px-4 py-8 text-sm text-slate-500">
                     Loading cart…
@@ -1062,69 +1149,125 @@ export default function SalesProcessingPage() {
                   </div>
                 ) : (
                   <div className="space-y-3">
-                    {activeOrder.items.map((item) => (
-                      <div
-                        key={item.id}
-                        className="flex items-start justify-between gap-3 rounded-lg border border-slate-200 bg-white p-3 transition hover:border-sky-200"
-                      >
-                        <div className="flex-1">
-                          <p className="text-sm font-semibold text-slate-900">
-                            {item.nameSnapshot}
-                          </p>
-                          <div className="mt-2 flex items-center gap-2">
-                            <button
-                              type="button"
-                              onClick={() => handleAdjustQuantity(item, -1)}
-                              disabled={isProcessing}
-                              className="flex h-6 w-6 items-center justify-center rounded border border-slate-300 bg-white text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                    {(() => {
+                      // Group items by productId (or nameSnapshot if productId is null)
+                      const groupedItems = activeOrder.items.reduce<
+                        Map<
+                          string,
+                          {
+                            items: OrderItem[];
+                            totalQty: number;
+                            totalLineSubtotal: number;
+                            totalLineDiscount: number;
+                            totalLineTotal: number;
+                          }
+                        >
+                      >((groups, item) => {
+                        const key =
+                          item.productId ?? `name:${item.nameSnapshot}`;
+                        const existing = groups.get(key);
+
+                        if (existing) {
+                          existing.items.push(item);
+                          existing.totalQty += item.qty;
+                          existing.totalLineSubtotal += item.lineSubtotal;
+                          existing.totalLineDiscount += item.lineDiscountTotal;
+                          existing.totalLineTotal += item.lineTotal;
+                        } else {
+                          groups.set(key, {
+                            items: [item],
+                            totalQty: item.qty,
+                            totalLineSubtotal: item.lineSubtotal,
+                            totalLineDiscount: item.lineDiscountTotal,
+                            totalLineTotal: item.lineTotal,
+                          });
+                        }
+
+                        return groups;
+                      }, new Map());
+
+                      return Array.from(groupedItems.values()).map(
+                        (group, index) => {
+                          const firstItem = group.items[0]!;
+                          const groupKey =
+                            firstItem.productId ??
+                            `name:${firstItem.nameSnapshot}`;
+
+                          return (
+                            <div
+                              key={groupKey}
+                              className="flex items-start justify-between gap-3 rounded-lg border border-slate-200 bg-white p-3 transition hover:border-sky-200"
                             >
-                              −
-                            </button>
-                            <span className="min-w-8 text-center text-xs font-semibold text-slate-700">
-                              {item.qty}
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => handleAdjustQuantity(item, 1)}
-                              disabled={
-                                isProcessing ||
-                                (item.productId
-                                  ? getRemainingStock(item.productId) <= 0
-                                  : false)
-                              }
-                              className="flex h-6 w-6 items-center justify-center rounded border border-slate-300 bg-white text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
-                            >
-                              +
-                            </button>
-                          </div>
-                        </div>
-                        <div className="text-right">
-                          <p className="text-sm font-semibold text-slate-900">
-                            {pesoFormatter.format(item.lineTotal)}
-                          </p>
-                          {item.lineDiscountTotal > 0 && (
-                            <p className="text-xs text-emerald-600">
-                              −{pesoFormatter.format(item.lineDiscountTotal)}
-                            </p>
-                          )}
-                          <button
-                            type="button"
-                            onClick={() => handleRemoveItem(item)}
-                            disabled={isProcessing}
-                            className="mt-1 text-xs font-medium text-rose-600 transition hover:text-rose-700 disabled:cursor-not-allowed disabled:opacity-60"
-                          >
-                            Remove
-                          </button>
-                        </div>
-                      </div>
-                    ))}
+                              <div className="flex-1">
+                                <p className="text-sm font-semibold text-slate-900">
+                                  {firstItem.nameSnapshot}
+                                </p>
+                                <div className="mt-2 flex items-center gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleAdjustQuantity(firstItem, -1)
+                                    }
+                                    disabled={isProcessing}
+                                    className="flex h-8 w-8 items-center justify-center rounded border border-slate-300 bg-white text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 sm:h-6 sm:w-6 sm:text-xs"
+                                  >
+                                    −
+                                  </button>
+                                  <span className="min-w-8 text-center text-xs font-semibold text-slate-700">
+                                    {group.totalQty}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleAdjustQuantity(firstItem, 1)
+                                    }
+                                    disabled={
+                                      isProcessing ||
+                                      (firstItem.productId
+                                        ? getRemainingStock(
+                                            firstItem.productId
+                                          ) <= 0
+                                        : false)
+                                    }
+                                    className="flex h-8 w-8 items-center justify-center rounded border border-slate-300 bg-white text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 sm:h-6 sm:w-6 sm:text-xs"
+                                  >
+                                    +
+                                  </button>
+                                </div>
+                              </div>
+                              <div className="text-right">
+                                <p className="text-sm font-semibold text-slate-900">
+                                  {pesoFormatter.format(group.totalLineTotal)}
+                                </p>
+                                {group.totalLineDiscount > 0 && (
+                                  <p className="text-xs text-emerald-600">
+                                    −
+                                    {pesoFormatter.format(
+                                      group.totalLineDiscount
+                                    )}
+                                  </p>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => handleRemoveItem(firstItem)}
+                                  disabled={isProcessing}
+                                  className="mt-1 text-xs font-medium text-rose-600 transition hover:text-rose-700 disabled:cursor-not-allowed disabled:opacity-60"
+                                >
+                                  Remove
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        }
+                      );
+                    })()}
                   </div>
                 )}
               </div>
             </div>
 
             {/* Totals & Payment Section */}
-            <div className="flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div className="flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white p-3 shadow-sm sm:p-4">
               <div className="space-y-3 border-b border-slate-200 pb-4">
                 <div className="flex items-center justify-between text-sm">
                   <span className="text-slate-600">Subtotal</span>
@@ -1170,7 +1313,7 @@ export default function SalesProcessingPage() {
                             : prev.tenderedAmount,
                       }))
                     }
-                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 outline-none transition focus:border-sky-500 focus:ring-2 focus:ring-sky-200"
+                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-700 outline-none transition focus:border-sky-500 focus:ring-2 focus:ring-sky-200 sm:py-2"
                     disabled={isProcessing || paymentMethods.length === 0}
                   >
                     <option value="" disabled>
@@ -1201,7 +1344,7 @@ export default function SalesProcessingPage() {
                             tenderedAmount: event.target.value,
                           }))
                         }
-                        className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-base font-semibold text-slate-900 outline-none transition focus:border-sky-500 focus:ring-2 focus:ring-sky-200"
+                        className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-base font-semibold text-slate-900 outline-none transition focus:border-sky-500 focus:ring-2 focus:ring-sky-200 sm:py-2"
                         disabled={isProcessing || !activeOrder}
                         placeholder={totalDue.toFixed(2)}
                       />
@@ -1239,7 +1382,7 @@ export default function SalesProcessingPage() {
                     totalDue <= 0 ||
                     (paymentForm.method === "CASH" && changeAmount < 0)
                   }
-                  className="w-full rounded-lg bg-sky-600 px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-700 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="w-full rounded-lg bg-sky-600 px-4 py-3.5 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-700 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 sm:py-3"
                 >
                   {isProcessing ? "Processing…" : "Place Order"}
                 </button>
