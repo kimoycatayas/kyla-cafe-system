@@ -1,9 +1,30 @@
 import { authStorage } from "./authStorage";
 import { getUnauthorizedHandler } from "./authEvents";
 
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, "") ??
-  "http://localhost:4000";
+function getApiBaseUrl(): string {
+  const envUrl = process.env.NEXT_PUBLIC_API_URL?.trim();
+
+  if (!envUrl) {
+    return "http://localhost:4000";
+  }
+
+  // Remove trailing slashes
+  const cleanUrl = envUrl.replace(/\/+$/, "");
+
+  // If URL doesn't start with http:// or https://, add https://
+  if (!cleanUrl.match(/^https?:\/\//i)) {
+    return `https://${cleanUrl}`;
+  }
+
+  return cleanUrl;
+}
+
+const API_BASE_URL = getApiBaseUrl();
+
+// Log API URL in development to help debug
+if (process.env.NODE_ENV === "development") {
+  console.log("[API Client] Base URL:", API_BASE_URL);
+}
 
 type RequestOptions = RequestInit & {
   parseJson?: boolean;
