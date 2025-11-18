@@ -162,6 +162,7 @@ enum UserRole {
   CASHIER
   MANAGER
   ADMIN
+  SUPER_ADMIN
 }
 
 enum OrderStatus {

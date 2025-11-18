@@ -2,9 +2,12 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 
 import { ProtectedRoute } from "@/components/auth/ProtectedRoute";
 import { Logo } from "@/components/branding/Logo";
+import { useAuth } from "@/components/auth/AuthSessionBoundary";
+import { expireUserAccessToken, logoutUser } from "@/lib/authClient";
 import { authStorage } from "@/lib/authStorage";
 import {
   CheckoutConfig,
@@ -14,21 +17,25 @@ import {
   OrderSummary,
   PaymentInput,
   PaymentMethod,
-  addOrderItem,
-  createOrder,
-  fetchCheckoutConfig,
-  fetchOrders,
-  finalizeOrder,
-  getOrderSummary,
-  removeOrderItem,
-  updateOrderItem,
-  voidOrder,
   type FinalizeOrderResult,
   type OrderReceipt,
 } from "@/lib/orderClient";
-import { fetchProducts } from "@/lib/productClient";
 import type { Product } from "@/lib/productClient";
-import { fetchInventory } from "@/lib/inventoryClient";
+import type { InventoryItem } from "@/lib/inventoryClient";
+// Local-first clients
+import {
+  fetchProductsLocalFirst,
+  fetchOrdersLocalFirst,
+  createOrderLocalFirst,
+  getOrderSummaryLocalFirst,
+  fetchInventoryLocalFirst,
+  fetchCheckoutConfigLocalFirst,
+  addOrderItemLocalFirst,
+  updateOrderItemLocalFirst,
+  removeOrderItemLocalFirst,
+  finalizeOrderLocalFirst,
+  voidOrderLocalFirst,
+} from "@/lib/localStorage/localFirstClient";
 
 type PaymentFormState = {
   method: PaymentMethod | "";
@@ -49,6 +56,23 @@ const statusStyles: Record<Order["status"], string> = {
 };
 
 export default function SalesProcessingPage() {
+  const router = useRouter();
+  const { user } = useAuth();
+  const [isDropdownOpen, setIsDropdownOpen] = useState(false);
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const [isExpiringToken, setIsExpiringToken] = useState(false);
+  const [tokenNotice, setTokenNotice] = useState<{
+    type: "success" | "error";
+    message: string;
+  } | null>(null);
+  const [showSuccessModal, setShowSuccessModal] = useState(false);
+  const [successOrderData, setSuccessOrderData] = useState<{
+    total: number;
+    cashReceived: number;
+    change: number;
+    orderNumber: string;
+  } | null>(null);
+  const dropdownRef = useRef<HTMLDivElement | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
   const [inventoryQuantities, setInventoryQuantities] = useState<
     Record<string, number>
@@ -78,7 +102,39 @@ export default function SalesProcessingPage() {
     null
   );
 
-  const user = useMemo(() => authStorage.getUser(), []);
+  const isCashier = user?.role === "CASHIER";
+
+  const profileInitials = useMemo(() => {
+    if (!user) {
+      return "U";
+    }
+
+    const source = user.profile?.fullName ?? user.email;
+    return (
+      source
+        .split(/\s+/)
+        .filter(Boolean)
+        .map((segment) => segment.charAt(0).toUpperCase())
+        .join("")
+        .slice(0, 2) || "U"
+    );
+  }, [user]);
+
+  const displayName = useMemo(() => {
+    if (!user) {
+      return "Team member";
+    }
+
+    return user.profile?.fullName ?? user.email;
+  }, [user]);
+
+  const userSubtitle = useMemo(() => {
+    if (!user) {
+      return "Signed in";
+    }
+
+    return user.profile?.businessName ?? user.role ?? "Signed in";
+  }, [user]);
 
   const pesoFormatter = useMemo(
     () =>
@@ -148,7 +204,7 @@ export default function SalesProcessingPage() {
 
   const refreshSummary = useCallback(
     async (orderId: string, preferredMethod?: PaymentMethod | "") => {
-      const summaryResponse = await getOrderSummary(orderId);
+      const summaryResponse = await getOrderSummaryLocalFirst(orderId);
       setSummary(summaryResponse);
 
       const nextCounts = summaryResponse.order.items.reduce<
@@ -182,7 +238,7 @@ export default function SalesProcessingPage() {
 
   const loadOrders = useCallback(
     async (selectOrderId?: string, preferredMethod?: PaymentMethod | "") => {
-      const orderList = await fetchOrders();
+      const orderList = await fetchOrdersLocalFirst();
 
       let targetOrderId = selectOrderId;
       if (!targetOrderId) {
@@ -216,10 +272,10 @@ export default function SalesProcessingPage() {
     try {
       const [configResponse, productList, inventoryList, orderList] =
         await Promise.all([
-          fetchCheckoutConfig(),
-          fetchProducts(),
-          fetchInventory(),
-          fetchOrders(),
+          fetchCheckoutConfigLocalFirst(),
+          fetchProductsLocalFirst(),
+          fetchInventoryLocalFirst(),
+          fetchOrdersLocalFirst(),
         ]);
 
       setConfig(configResponse);
@@ -236,7 +292,7 @@ export default function SalesProcessingPage() {
       let targetOrder = orderList.find((order) => order.status === "OPEN");
 
       if (!targetOrder) {
-        targetOrder = await createOrder({ cashierId: user.id });
+        targetOrder = await createOrderLocalFirst({ cashierId: user.id });
         orderList.unshift(targetOrder);
       }
 
@@ -247,7 +303,7 @@ export default function SalesProcessingPage() {
       setErrorMessage(
         err instanceof Error
           ? err.message
-          : "We couldn’t load the checkout workspace. Please try again."
+          : "We couldn't load the checkout workspace. Please try again."
       );
     } finally {
       setIsLoading(false);
@@ -328,7 +384,7 @@ export default function SalesProcessingPage() {
           continue;
         }
 
-        await addOrderItem(orderId, {
+        await addOrderItemLocalFirst(orderId, {
           productId: product.id,
           nameSnapshot: product.name,
           qty: allowedQty,
@@ -404,7 +460,7 @@ export default function SalesProcessingPage() {
     setIsProcessing(true);
 
     try {
-      const newOrder = await createOrder({ cashierId: user.id });
+      const newOrder = await createOrderLocalFirst({ cashierId: user.id });
       await loadOrders(newOrder.id, paymentForm.method);
       setFeedbackMessage("New order created. Ready to add items.");
     } catch (err) {
@@ -488,7 +544,9 @@ export default function SalesProcessingPage() {
     clearMessages();
     setIsProcessing(true);
     try {
-      await updateOrderItem(context.order.id, item.id, { qty: targetQty });
+      await updateOrderItemLocalFirst(context.order.id, item.id, {
+        qty: targetQty,
+      });
       updateOrderQuantity(item.productId, () => targetQty);
       await refreshSummary(context.order.id, paymentForm.method);
       setFeedbackMessage("Item quantity updated.");
@@ -510,7 +568,7 @@ export default function SalesProcessingPage() {
     clearMessages();
     setIsProcessing(true);
     try {
-      await removeOrderItem(context.order.id, item.id);
+      await removeOrderItemLocalFirst(context.order.id, item.id);
       await refreshSummary(context.order.id, paymentForm.method);
       setFeedbackMessage(`${item.nameSnapshot} removed from the order.`);
     } catch (err) {
@@ -533,7 +591,7 @@ export default function SalesProcessingPage() {
     clearMessages();
     setIsProcessing(true);
     try {
-      await voidOrder(context.order.id);
+      await voidOrderLocalFirst(context.order.id);
       await loadOrders(context.order.id, paymentForm.method);
       setFeedbackMessage("Order voided. Create a new order when ready.");
     } catch (err) {
@@ -556,16 +614,8 @@ export default function SalesProcessingPage() {
       return;
     }
 
-    const amountValue = Number(paymentForm.amount);
-    const tenderedValue = Number(paymentForm.tenderedAmount);
-
-    if (!Number.isFinite(amountValue) || amountValue <= 0) {
-      setErrorMessage("Payment amount must be greater than zero.");
-      return;
-    }
-
-    if (!Number.isFinite(tenderedValue) || tenderedValue < amountValue) {
-      setErrorMessage("Tendered amount cannot be less than the amount due.");
+    if (!summary || summary.totals.totalDue <= 0) {
+      setErrorMessage("Order total must be greater than zero.");
       return;
     }
 
@@ -574,12 +624,21 @@ export default function SalesProcessingPage() {
     clearMessages();
     setIsProcessing(true);
 
+    const totalDue = summary.totals.totalDue;
+    const tenderedAmount = Number(paymentForm.tenderedAmount) || totalDue;
+
+    if (tenderedAmount < totalDue) {
+      setErrorMessage("Tendered amount cannot be less than the amount due.");
+      setIsProcessing(false);
+      return;
+    }
+
     const payload: FinalizeOrderPayload = {
       payments: [
         {
           method: paymentForm.method,
-          amount: amountValue,
-          tenderedAmount: tenderedValue,
+          amount: totalDue,
+          tenderedAmount: tenderedAmount,
           processedByUserId: context.userId,
         } satisfies PaymentInput,
       ],
@@ -605,15 +664,22 @@ export default function SalesProcessingPage() {
     };
 
     try {
-      const result: FinalizeOrderResult = await finalizeOrder(
+      const result: FinalizeOrderResult = await finalizeOrderLocalFirst(
         context.order.id,
         payload
       );
       triggerReceiptDownload(result.receipt);
+
+      // Show success modal with payment details
+      setSuccessOrderData({
+        total: totalDue,
+        cashReceived: tenderedAmount,
+        change: changeAmount,
+        orderNumber: result.receipt.orderNumber,
+      });
+      setShowSuccessModal(true);
+
       await loadOrders(context.order.id, paymentForm.method);
-      setFeedbackMessage(
-        "Order paid successfully. Ready for the next customer."
-      );
     } catch (err) {
       setErrorMessage(
         err instanceof Error
@@ -647,100 +713,128 @@ export default function SalesProcessingPage() {
     }
   };
 
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (!dropdownRef.current) {
+        return;
+      }
+
+      if (!dropdownRef.current.contains(event.target as Node)) {
+        setIsDropdownOpen(false);
+      }
+    };
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setIsDropdownOpen(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handleClickOutside);
+    document.addEventListener("keydown", handleEscape);
+
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, []);
+
+  const handleOpenSettings = () => {
+    setIsDropdownOpen(false);
+    router.push("/user-settings");
+  };
+
+  const handleLogout = async () => {
+    if (isLoggingOut) {
+      return;
+    }
+
+    setIsLoggingOut(true);
+    setIsDropdownOpen(false);
+
+    try {
+      const refreshToken = authStorage.getRefreshToken();
+      if (refreshToken) {
+        await logoutUser(refreshToken);
+      }
+    } catch (error) {
+      console.error("Logout failed", error);
+    } finally {
+      authStorage.clear();
+      router.replace("/login");
+      setIsLoggingOut(false);
+    }
+  };
+
+  const handleExpireToken = async () => {
+    if (!user || isExpiringToken) {
+      return;
+    }
+
+    setIsExpiringToken(true);
+    setTokenNotice(null);
+    setIsDropdownOpen(false);
+
+    try {
+      await expireUserAccessToken(user.id);
+      setTokenNotice({
+        type: "success",
+        message:
+          "Current access token expired. Perform any action to trigger re-login.",
+      });
+    } catch (err) {
+      setTokenNotice({
+        type: "error",
+        message:
+          err instanceof Error ? err.message : "Failed to expire access token.",
+      });
+    } finally {
+      setIsExpiringToken(false);
+    }
+  };
+
   const paymentMethods = config?.paymentMethods ?? [];
+
+  const totalDue = summary?.totals.totalDue ?? 0;
+  const tenderedAmount = Number(paymentForm.tenderedAmount) || 0;
+  const changeAmount = tenderedAmount > 0 ? tenderedAmount - totalDue : 0;
 
   return (
     <ProtectedRoute>
       <div className="min-h-screen bg-slate-50">
         <header className="border-b border-slate-200 bg-white">
-          <div className="mx-auto flex w-full max-w-6xl flex-wrap items-center justify-between gap-4 px-6 py-6">
-            <div className="flex flex-wrap items-center gap-4">
+          <div className="flex w-full items-center justify-between gap-4 px-6 py-4">
+            {/* Left: Logo and Title */}
+            <div className="flex items-center gap-4">
               <Logo
                 href="/sales-processing"
-                size={100}
+                size={60}
                 showText={false}
-                imageClassName="w-auto"
+                imageClassName="w-auto h-auto"
                 className="shrink-0"
               />
               <div>
-                <p className="text-sm font-medium uppercase tracking-wide text-sky-600">
-                  Sales Processing
-                </p>
-                <h1 className="text-3xl font-semibold text-slate-900">
-                  Checkout and payment center
+                <h1 className="text-xl font-semibold text-slate-900">
+                  Checkout
                 </h1>
-                <p className="mt-2 text-sm text-slate-600">
-                  Add items quickly, process mixed tenders, and keep inventory
-                  in sync.
-                </p>
               </div>
             </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={handleCreateOrder}
-                disabled={isProcessing || !user}
-                className="rounded-full bg-sky-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-70"
-              >
-                {isProcessing ? "Working…" : "New order"}
-              </button>
-              <Link
-                href="/orders"
-                className="rounded-full border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:border-sky-200 hover:text-sky-700"
-              >
-                Orders
-              </Link>
-              <Link
-                href="/dashboard"
-                className="rounded-full border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:border-sky-200 hover:text-sky-700"
-              >
-                Back to dashboard
-              </Link>
-            </div>
-          </div>
-        </header>
 
-        <main className="mx-auto flex w-full max-w-6xl flex-col gap-8 px-6 py-10">
-          {error ? (
-            <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
-              {error}
-            </div>
-          ) : null}
-          {feedback ? (
-            <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
-              {feedback}
-            </div>
-          ) : null}
-
-          <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <div>
-                <h2 className="text-lg font-semibold text-slate-900">
-                  Active order
-                </h2>
-                <p className="text-sm text-slate-500">
-                  {isLoading
-                    ? "Loading checkout workspace…"
-                    : activeOrder
-                    ? `Order ${activeOrder.orderNumber}`
-                    : "Create a new order to begin checkout."}
-                </p>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                {activeOrder ? (
-                  <span
-                    className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                      statusStyles[activeOrder.status]
-                    }`}
-                  >
-                    {activeOrder.status}
-                  </span>
-                ) : null}
+            {/* Center: Order Info */}
+            {activeOrder && (
+              <div className="flex items-center gap-3">
+                <span
+                  className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                    statusStyles[activeOrder.status]
+                  }`}
+                >
+                  {activeOrder.orderNumber}
+                </span>
                 <button
                   type="button"
                   onClick={handleRefreshSummary}
-                  disabled={isProcessing || !activeOrder}
-                  className="rounded-full border border-slate-200 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-slate-600 transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-70"
+                  disabled={isProcessing}
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   Refresh
                 </button>
@@ -752,279 +846,353 @@ export default function SalesProcessingPage() {
                     !activeOrder ||
                     activeOrder.status !== "OPEN"
                   }
-                  className="rounded-full border border-rose-200 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-rose-600 transition hover:border-rose-300 hover:text-rose-700 disabled:cursor-not-allowed disabled:opacity-70"
+                  className="rounded-lg border border-rose-300 bg-white px-3 py-1.5 text-xs font-semibold text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  Void order
+                  Void
                 </button>
+              </div>
+            )}
+
+            {/* Right: Actions and User */}
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={handleCreateOrder}
+                disabled={isProcessing || !user}
+                className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-70"
+              >
+                {isProcessing ? "Working…" : "New Order"}
+              </button>
+              {!isCashier && (
+                <>
+                  <Link
+                    href="/orders"
+                    className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                  >
+                    Orders
+                  </Link>
+                  <Link
+                    href="/dashboard"
+                    className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                  >
+                    Dashboard
+                  </Link>
+                </>
+              )}
+              <div
+                className="relative flex items-center gap-2"
+                ref={dropdownRef}
+              >
+                <div className="hidden text-right sm:block">
+                  <p className="text-sm font-medium text-slate-900">
+                    {displayName}
+                  </p>
+                  <p className="text-xs text-slate-500">{userSubtitle}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsDropdownOpen((prev) => !prev)}
+                  aria-haspopup="menu"
+                  aria-expanded={isDropdownOpen}
+                  className="flex h-9 w-9 items-center justify-center rounded-full bg-slate-900 text-xs font-semibold uppercase tracking-wide text-white transition hover:bg-slate-800"
+                >
+                  {profileInitials}
+                </button>
+                {isDropdownOpen ? (
+                  <div className="absolute right-0 top-12 z-20 w-48 rounded-lg border border-slate-200 bg-white p-1 shadow-lg">
+                    <button
+                      type="button"
+                      onClick={handleOpenSettings}
+                      className="w-full rounded-md px-3 py-2 text-left text-sm font-medium text-slate-700 transition hover:bg-slate-100"
+                    >
+                      User settings
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleExpireToken}
+                      disabled={isExpiringToken || !user}
+                      className="mt-1 w-full rounded-md px-3 py-2 text-left text-sm font-medium text-amber-600 transition hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {isExpiringToken ? "Expiring…" : "Expire access token"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleLogout}
+                      disabled={isLoggingOut}
+                      className="mt-1 w-full rounded-md px-3 py-2 text-left text-sm font-medium text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {isLoggingOut ? "Signing out…" : "Logout"}
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        </header>
+
+        <main className="flex h-[calc(100vh-80px)] gap-4 overflow-hidden px-6 py-4">
+          {tokenNotice ? (
+            <div
+              className={`absolute left-1/2 top-20 z-50 -translate-x-1/2 rounded-2xl border px-4 py-3 text-sm font-medium ${
+                tokenNotice.type === "success"
+                  ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                  : "border-rose-200 bg-rose-50 text-rose-700"
+              }`}
+            >
+              {tokenNotice.message}
+            </div>
+          ) : null}
+          {error ? (
+            <div className="absolute left-1/2 top-20 z-50 -translate-x-1/2 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+              {error}
+            </div>
+          ) : null}
+          {feedback ? (
+            <div className="absolute left-1/2 top-20 z-50 -translate-x-1/2 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+              {feedback}
+            </div>
+          ) : null}
+
+          {/* Products Section - Left (70%) */}
+          <div className="flex w-[70%] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+            <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-900">
+                  Products
+                </h2>
+                <p className="text-sm text-slate-500">
+                  {isLoading
+                    ? "Loading products…"
+                    : products.length > 0
+                    ? `${products.length} product(s) available`
+                    : "No products available"}
+                </p>
               </div>
             </div>
 
-            <div className="mt-6 grid gap-6 lg:grid-cols-[1.4fr,1fr]">
-              <div className="rounded-2xl border border-slate-100 p-4">
-                <div className="flex items-center justify-between">
-                  <p className="text-sm font-semibold text-slate-700">
-                    Cart items
-                  </p>
-                  <span className="text-xs text-slate-500">
-                    {products.length > 0
-                      ? `${products.length} product(s)`
-                      : "—"}
-                  </span>
+            <div className="flex-1 overflow-y-auto p-6">
+              {isLoading ? (
+                <div className="flex items-center justify-center rounded-xl border border-dashed border-slate-200 px-4 py-12 text-sm text-slate-500">
+                  Loading products…
                 </div>
-
-                <div className="mt-4">
-                  {isLoading ? (
-                    <div className="flex items-center justify-center rounded-xl border border-dashed border-slate-200 px-4 py-6 text-sm text-slate-500">
-                      Loading products…
-                    </div>
-                  ) : products.length === 0 ? (
-                    <div className="flex items-center justify-center rounded-xl border border-dashed border-slate-200 px-4 py-6 text-sm text-slate-500">
-                      Products will appear here once added in Product
-                      Management.
-                    </div>
-                  ) : (
-                    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                      {products.map((product) => {
-                        const queuedCount = pendingProductAdds[product.id] ?? 0;
-                        const stockLevel = getRemainingStock(product.id);
-                        const isOutOfStock = stockLevel <= 0;
-                        return (
-                          <button
-                            key={product.id}
-                            type="button"
-                            onClick={() => handleAddProduct(product)}
-                            disabled={!activeOrder || isOutOfStock}
-                            className="flex flex-col items-start gap-1 rounded-2xl border border-slate-200 px-4 py-3 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
-                          >
-                            <span className="text-sm font-semibold text-slate-900">
+              ) : products.length === 0 ? (
+                <div className="flex items-center justify-center rounded-xl border border-dashed border-slate-200 px-4 py-12 text-sm text-slate-500">
+                  Products will appear here once added in Product Management.
+                </div>
+              ) : (
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                  {products.map((product) => {
+                    const queuedCount = pendingProductAdds[product.id] ?? 0;
+                    const stockLevel = getRemainingStock(product.id);
+                    const isOutOfStock = stockLevel <= 0;
+                    return (
+                      <button
+                        key={product.id}
+                        type="button"
+                        onClick={() => handleAddProduct(product)}
+                        disabled={!activeOrder || isOutOfStock}
+                        className="group flex flex-col gap-2 rounded-xl border border-slate-200 bg-white p-4 text-left shadow-sm transition-all hover:-translate-y-1 hover:border-sky-300 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0"
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex-1">
+                            <h3 className="font-semibold text-slate-900 group-hover:text-sky-700">
                               {product.name}
-                            </span>
-                            <span className="text-xs text-slate-500">
-                              SKU: {product.sku}
-                            </span>
-                            <span className="text-sm font-semibold text-slate-900">
-                              {pesoFormatter.format(product.price)}
-                            </span>
-                            {Number.isFinite(stockLevel) ? (
-                              <span
-                                className={`text-xs font-semibold ${
-                                  isOutOfStock
-                                    ? "text-rose-600"
-                                    : stockLevel <= 3
-                                    ? "text-amber-600"
-                                    : "text-emerald-600"
-                                }`}
-                              >
-                                {isOutOfStock
-                                  ? "Out of stock"
-                                  : `Stock: ${stockLevel}`}
-                              </span>
-                            ) : null}
-                            {queuedCount > 0 ? (
-                              <span className="text-xs font-semibold text-sky-600">
-                                Queued ×{queuedCount}
-                              </span>
-                            ) : null}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-
-                <div className="mt-6 rounded-2xl border border-slate-100 bg-slate-50 p-4">
-                  <div className="flex items-center justify-between">
-                    <p className="text-sm font-semibold text-slate-700">
-                      Current cart
-                    </p>
-                    <span className="text-xs text-slate-500">
-                      {summary ? `${summary.itemCount} item(s)` : "—"}
-                    </span>
-                  </div>
-
-                  <div className="mt-3 space-y-3 text-sm text-slate-600">
-                    {isLoading ? (
-                      <div className="flex items-center justify-center rounded-xl border border-dashed border-slate-200 px-4 py-6 text-slate-500">
-                        Loading cart…
-                      </div>
-                    ) : !activeOrder || activeOrder.items.length === 0 ? (
-                      <div className="flex items-center justify-center rounded-xl border border-dashed border-slate-200 px-4 py-6 text-slate-500">
-                        No items yet. Tap a product above to add it.
-                      </div>
-                    ) : (
-                      activeOrder.items.map((item) => (
-                        <div
-                          key={item.id}
-                          className="flex items-start justify-between gap-4 rounded-xl border border-slate-200 bg-white px-4 py-3 transition hover:border-sky-200"
-                        >
-                          <div>
-                            <p className="font-semibold text-slate-900">
-                              {item.nameSnapshot}
+                            </h3>
+                            <p className="mt-0.5 text-xs text-slate-500">
+                              {product.sku}
                             </p>
-                            <div className="mt-2 flex items-center gap-2 text-xs text-slate-500">
-                              <button
-                                type="button"
-                                onClick={() => handleAdjustQuantity(item, -1)}
-                                disabled={isProcessing}
-                                className="rounded-full border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600 transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
-                              >
-                                −
-                              </button>
-                              <span className="font-semibold text-slate-700">
-                                Qty: {item.qty}
-                              </span>
-                              <button
-                                type="button"
-                                onClick={() => handleAdjustQuantity(item, 1)}
-                                disabled={
-                                  isProcessing ||
-                                  (item.productId
-                                    ? getRemainingStock(item.productId) <= 0
-                                    : false)
-                                }
-                                className="rounded-full border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600 transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
-                              >
-                                +
-                              </button>
-                            </div>
                           </div>
-                          <div className="text-right text-sm">
-                            <p className="font-semibold text-slate-900">
-                              {pesoFormatter.format(item.lineTotal)}
-                            </p>
-                            {item.lineDiscountTotal > 0 ? (
-                              <p className="text-xs text-emerald-600">
-                                − {pesoFormatter.format(item.lineDiscountTotal)}
-                              </p>
-                            ) : null}
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-base font-bold text-slate-900">
+                            {pesoFormatter.format(product.price)}
+                          </span>
+                          {Number.isFinite(stockLevel) && (
+                            <span
+                              className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+                                isOutOfStock
+                                  ? "bg-rose-100 text-rose-700"
+                                  : stockLevel <= 3
+                                  ? "bg-amber-100 text-amber-700"
+                                  : "bg-emerald-100 text-emerald-700"
+                              }`}
+                            >
+                              {isOutOfStock ? "Out" : stockLevel}
+                            </span>
+                          )}
+                        </div>
+                        {queuedCount > 0 && (
+                          <div className="rounded-lg bg-sky-50 px-2 py-1 text-xs font-semibold text-sky-700">
+                            Queued ×{queuedCount}
+                          </div>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Cart & Checkout Section - Right (30%) */}
+          <div className="flex w-[30%] flex-col gap-4 overflow-hidden">
+            <div className="flex flex-1 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+              <div className="border-b border-slate-200 bg-slate-50 px-4 py-3">
+                <h2 className="text-lg font-semibold text-slate-900">
+                  Current Cart
+                </h2>
+                <p className="text-xs text-slate-500">
+                  {summary ? `${summary.itemCount} item(s)` : "No items"}
+                </p>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-4">
+                {isLoading ? (
+                  <div className="flex items-center justify-center rounded-xl border border-dashed border-slate-200 px-4 py-8 text-sm text-slate-500">
+                    Loading cart…
+                  </div>
+                ) : !activeOrder || activeOrder.items.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-slate-200 px-4 py-12 text-center">
+                    <p className="text-sm font-medium text-slate-500">
+                      No Item Selected
+                    </p>
+                    <p className="mt-1 text-xs text-slate-400">
+                      Tap a product to add it
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {activeOrder.items.map((item) => (
+                      <div
+                        key={item.id}
+                        className="flex items-start justify-between gap-3 rounded-lg border border-slate-200 bg-white p-3 transition hover:border-sky-200"
+                      >
+                        <div className="flex-1">
+                          <p className="text-sm font-semibold text-slate-900">
+                            {item.nameSnapshot}
+                          </p>
+                          <div className="mt-2 flex items-center gap-2">
                             <button
                               type="button"
-                              onClick={() => handleRemoveItem(item)}
+                              onClick={() => handleAdjustQuantity(item, -1)}
                               disabled={isProcessing}
-                              className="mt-2 inline-flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-rose-600 transition hover:text-rose-700 disabled:cursor-not-allowed disabled:opacity-60"
+                              className="flex h-6 w-6 items-center justify-center rounded border border-slate-300 bg-white text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
                             >
-                              Remove
+                              −
+                            </button>
+                            <span className="min-w-[2rem] text-center text-xs font-semibold text-slate-700">
+                              {item.qty}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleAdjustQuantity(item, 1)}
+                              disabled={
+                                isProcessing ||
+                                (item.productId
+                                  ? getRemainingStock(item.productId) <= 0
+                                  : false)
+                              }
+                              className="flex h-6 w-6 items-center justify-center rounded border border-slate-300 bg-white text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                              +
                             </button>
                           </div>
                         </div>
-                      ))
-                    )}
+                        <div className="text-right">
+                          <p className="text-sm font-semibold text-slate-900">
+                            {pesoFormatter.format(item.lineTotal)}
+                          </p>
+                          {item.lineDiscountTotal > 0 && (
+                            <p className="text-xs text-emerald-600">
+                              −{pesoFormatter.format(item.lineDiscountTotal)}
+                            </p>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveItem(item)}
+                            disabled={isProcessing}
+                            className="mt-1 text-xs font-medium text-rose-600 transition hover:text-rose-700 disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      </div>
+                    ))}
                   </div>
+                )}
+              </div>
+            </div>
+
+            {/* Totals & Payment Section */}
+            <div className="flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+              <div className="space-y-3 border-b border-slate-200 pb-4">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-slate-600">Subtotal</span>
+                  <span className="font-semibold text-slate-900">
+                    {summary
+                      ? pesoFormatter.format(summary.totals.subtotal)
+                      : pesoFormatter.format(0)}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-slate-600">Discounts</span>
+                  <span className="font-semibold text-emerald-600">
+                    −
+                    {summary
+                      ? pesoFormatter.format(summary.totals.discountTotal)
+                      : pesoFormatter.format(0)}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between border-t border-slate-200 pt-3">
+                  <span className="text-base font-semibold text-slate-900">
+                    TOTAL
+                  </span>
+                  <span className="text-lg font-bold text-slate-900">
+                    {pesoFormatter.format(totalDue)}
+                  </span>
                 </div>
               </div>
 
-              <div className="flex flex-col gap-4">
-                <div className="rounded-2xl border border-slate-100 p-4 text-sm text-slate-600">
-                  <p className="text-sm font-semibold text-slate-700">Totals</p>
-                  <div className="mt-3 space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span>Subtotal</span>
-                      <span className="font-medium text-slate-900">
-                        {summary
-                          ? pesoFormatter.format(summary.totals.subtotal)
-                          : "—"}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <span>Discounts</span>
-                      <span className="font-medium text-emerald-600">
-                        −
-                        {summary
-                          ? pesoFormatter.format(summary.totals.discountTotal)
-                          : "—"}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between pt-2 text-base font-semibold text-slate-900">
-                      <span>Total due</span>
-                      <span>
-                        {summary
-                          ? pesoFormatter.format(summary.totals.totalDue)
-                          : "—"}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between text-xs text-slate-500">
-                      <span>Paid</span>
-                      <span>
-                        {summary
-                          ? pesoFormatter.format(summary.totals.totalPaid)
-                          : "—"}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between text-xs text-slate-500">
-                      <span>Change due</span>
-                      <span>
-                        {summary
-                          ? pesoFormatter.format(summary.totals.changeDue)
-                          : "—"}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between text-xs text-slate-500">
-                      <span>Balance remaining</span>
-                      <span>
-                        {summary
-                          ? pesoFormatter.format(summary.totals.balanceDue)
-                          : "—"}
-                      </span>
-                    </div>
-                  </div>
-                </div>
+              <div className="space-y-3">
+                <label className="block">
+                  <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Payment Method
+                  </span>
+                  <select
+                    value={paymentForm.method}
+                    onChange={(event) =>
+                      setPaymentForm((prev) => ({
+                        ...prev,
+                        method: event.target.value as PaymentMethod,
+                        tenderedAmount:
+                          event.target.value === "CASH" && totalDue > 0
+                            ? totalDue.toFixed(2)
+                            : prev.tenderedAmount,
+                      }))
+                    }
+                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 outline-none transition focus:border-sky-500 focus:ring-2 focus:ring-sky-200"
+                    disabled={isProcessing || paymentMethods.length === 0}
+                  >
+                    <option value="" disabled>
+                      Select payment method
+                    </option>
+                    {paymentMethods.map((method) => (
+                      <option key={method.value} value={method.value}>
+                        {method.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
 
-                <div className="rounded-2xl border border-slate-100 p-4">
-                  <p className="text-sm font-semibold text-slate-700">
-                    Take payment
-                  </p>
-                  <div className="mt-3 space-y-3 text-sm text-slate-600">
-                    <label className="grid gap-2">
-                      <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                        Payment method
-                      </span>
-                      <select
-                        value={paymentForm.method}
-                        onChange={(event) =>
-                          setPaymentForm((prev) => ({
-                            ...prev,
-                            method: event.target.value as PaymentMethod,
-                          }))
-                        }
-                        className="rounded-2xl border border-slate-200 px-3 py-2 outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
-                        disabled={isProcessing || paymentMethods.length === 0}
-                      >
-                        <option value="" disabled>
-                          Select
-                        </option>
-                        {paymentMethods.map((method) => (
-                          <option key={method.value} value={method.value}>
-                            {method.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="grid gap-2">
-                      <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                        Amount (₱)
+                {paymentForm.method === "CASH" && totalDue > 0 && (
+                  <>
+                    <label className="block">
+                      <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        Customer Cash (₱)
                       </span>
                       <input
                         type="number"
-                        min="0"
-                        step="0.01"
-                        value={paymentForm.amount}
-                        onChange={(event) =>
-                          setPaymentForm((prev) => ({
-                            ...prev,
-                            amount: event.target.value,
-                          }))
-                        }
-                        className="rounded-2xl border border-slate-200 px-3 py-2 outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
-                        disabled={isProcessing || !activeOrder}
-                      />
-                    </label>
-                    <label className="grid gap-2">
-                      <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                        Tendered (₱)
-                      </span>
-                      <input
-                        type="number"
-                        min="0"
+                        min={totalDue}
                         step="0.01"
                         value={paymentForm.tenderedAmount}
                         onChange={(event) =>
@@ -1033,29 +1201,126 @@ export default function SalesProcessingPage() {
                             tenderedAmount: event.target.value,
                           }))
                         }
-                        className="rounded-2xl border border-slate-200 px-3 py-2 outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+                        className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-base font-semibold text-slate-900 outline-none transition focus:border-sky-500 focus:ring-2 focus:ring-sky-200"
                         disabled={isProcessing || !activeOrder}
+                        placeholder={totalDue.toFixed(2)}
                       />
                     </label>
-                    <button
-                      type="button"
-                      onClick={handleFinalizeOrder}
-                      disabled={
-                        isProcessing ||
-                        !activeOrder ||
-                        activeOrder.status !== "OPEN" ||
-                        (activeOrder.items?.length ?? 0) === 0
-                      }
-                      className="w-full rounded-full bg-emerald-600 px-6 py-3 text-sm font-semibold text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-70"
-                    >
-                      Finalise and print receipt
-                    </button>
-                  </div>
-                </div>
+                    {tenderedAmount > 0 && (
+                      <div className="rounded-lg border-2 border-emerald-200 bg-emerald-50 p-3">
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm font-semibold text-emerald-900">
+                            Change
+                          </span>
+                          <span className="text-lg font-bold text-emerald-700">
+                            {changeAmount >= 0
+                              ? pesoFormatter.format(changeAmount)
+                              : "—"}
+                          </span>
+                        </div>
+                        {changeAmount < 0 && (
+                          <p className="mt-1 text-xs text-rose-600">
+                            Insufficient amount
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </>
+                )}
+
+                <button
+                  type="button"
+                  onClick={handleFinalizeOrder}
+                  disabled={
+                    isProcessing ||
+                    !activeOrder ||
+                    !paymentForm.method ||
+                    activeOrder.items.length === 0 ||
+                    totalDue <= 0 ||
+                    (paymentForm.method === "CASH" && changeAmount < 0)
+                  }
+                  className="w-full rounded-lg bg-sky-600 px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-700 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {isProcessing ? "Processing…" : "Place Order"}
+                </button>
               </div>
             </div>
-          </section>
+          </div>
         </main>
+
+        {/* Success Modal */}
+        {showSuccessModal && successOrderData && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+            <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-xl">
+              <div className="mb-6 text-center">
+                <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-emerald-100">
+                  <svg
+                    className="h-8 w-8 text-emerald-600"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M5 13l4 4L19 7"
+                    />
+                  </svg>
+                </div>
+                <h2 className="text-2xl font-bold text-slate-900">
+                  Order Successful!
+                </h2>
+                <p className="mt-2 text-sm text-slate-600">
+                  Order #{successOrderData.orderNumber}
+                </p>
+              </div>
+
+              <div className="space-y-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-medium text-slate-600">
+                    Total Amount
+                  </span>
+                  <span className="text-lg font-bold text-slate-900">
+                    {pesoFormatter.format(successOrderData.total)}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-medium text-slate-600">
+                    Cash Received
+                  </span>
+                  <span className="text-lg font-bold text-slate-900">
+                    {pesoFormatter.format(successOrderData.cashReceived)}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between border-t border-slate-300 pt-3">
+                  <span className="text-base font-semibold text-slate-900">
+                    Change
+                  </span>
+                  <span className="text-2xl font-bold text-emerald-600">
+                    {pesoFormatter.format(successOrderData.change)}
+                  </span>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setShowSuccessModal(false);
+                  setSuccessOrderData(null);
+                  setPaymentForm((prev) => ({
+                    ...prev,
+                    method: "",
+                    tenderedAmount: "0.00",
+                  }));
+                }}
+                className="mt-6 w-full rounded-lg bg-sky-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-sky-700 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:ring-offset-2"
+              >
+                Continue
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </ProtectedRoute>
   );

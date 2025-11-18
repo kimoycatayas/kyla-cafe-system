@@ -11,6 +11,7 @@ import { logger, serializeError } from "./lib/logger";
 import orderRouter from "./orders/orderRoutes";
 import productRouter from "./products/productRoutes";
 import dashboardRouter from "./dashboard/dashboardRoutes";
+import userRouter from "./users/userRoutes";
 
 const app = express();
 
@@ -23,6 +24,7 @@ app.use("/inventory", inventoryRouter);
 app.use("/discount-types", discountTypeRouter);
 app.use("/orders", orderRouter);
 app.use("/dashboard", dashboardRouter);
+app.use("/users", userRouter);
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok" });

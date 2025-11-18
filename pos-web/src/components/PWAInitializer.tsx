@@ -1,0 +1,24 @@
+"use client";
+
+import { useEffect } from "react";
+import { registerServiceWorker } from "@/lib/pwa/registerServiceWorker";
+import { startSyncManager } from "@/lib/localStorage/syncManager";
+
+export function PWAInitializer() {
+  useEffect(() => {
+    // Register service worker
+    void registerServiceWorker();
+
+    // Start sync manager
+    startSyncManager(10000); // Check every 10 seconds
+
+    return () => {
+      // Cleanup if needed
+      const { stopSyncManager } = require("@/lib/localStorage/syncManager");
+      stopSyncManager();
+    };
+  }, []);
+
+  return null;
+}
+

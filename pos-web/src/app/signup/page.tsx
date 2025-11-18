@@ -8,13 +8,6 @@ import { register, toAuthPayload } from "../../lib/authClient";
 import { authStorage } from "../../lib/authStorage";
 import { Logo } from "@/components/branding/Logo";
 
-const benefits = [
-  "Unlimited registers and staff accounts",
-  "Sync with barcode scanners and receipt printers",
-  "Peso reports that match your BIR requirements",
-  "Offline mode for pop-up kiosks and market stalls",
-];
-
 type SignupFormState = {
   businessName: string;
   industry: string;
@@ -78,7 +71,13 @@ export default function SignupPage() {
       });
 
       authStorage.save(toAuthPayload(response));
-      router.replace("/dashboard");
+      
+      // Redirect cashiers to sales processing, others to dashboard
+      const redirectPath = response.user.role === "CASHIER" 
+        ? "/sales-processing" 
+        : "/dashboard";
+      
+      router.replace(redirectPath);
       router.refresh();
     } catch (err) {
       if (err instanceof Error) {
@@ -93,51 +92,7 @@ export default function SignupPage() {
 
   return (
     <div className="flex min-h-screen items-stretch bg-slate-900">
-      <div className="hidden w-1/2 flex-col justify-between bg-[url('/window.svg')] bg-cover bg-center bg-no-repeat p-12 text-white lg:flex">
-        <div>
-          <Logo
-            showText
-            size={44}
-            textClassName="text-lg font-semibold text-white"
-            imageClassName="h-10 w-auto"
-            className="mb-6"
-            priority
-          />
-          <Link
-            href="/"
-            className="inline-flex items-center gap-2 rounded-full bg-white/10 px-4 py-2 text-sm font-medium text-white transition hover:bg-white/20"
-          >
-            Back to home
-          </Link>
-          <h1 className="mt-10 max-w-lg text-4xl font-semibold leading-tight">
-            Designed for modern Filipino retailers, cafes, and service brands.
-          </h1>
-          <p className="mt-6 max-w-md text-sm text-slate-100/80">
-            Kyla Cafe System gives you real-time visibility into sales, stock,
-            and staff performance across every branch. Launch faster, scale
-            smarter.
-          </p>
-        </div>
-
-        <div className="rounded-3xl bg-white/10 p-8 backdrop-blur">
-          <p className="text-xs font-semibold uppercase tracking-wider text-sky-100">
-            Why teams choose Kyla Cafe System
-          </p>
-          <ul className="mt-6 space-y-3 text-sm text-slate-100">
-            {benefits.map((benefit) => (
-              <li
-                key={benefit}
-                className="flex items-start gap-3 leading-relaxed"
-              >
-                <span className="mt-1 h-2 w-2 rounded-full bg-sky-400" />
-                {benefit}
-              </li>
-            ))}
-          </ul>
-        </div>
-      </div>
-
-      <div className="flex w-full flex-col justify-center bg-white px-8 py-16 sm:px-16 lg:w-1/2">
+      <div className="flex w-full flex-col justify-center bg-white px-8 py-16 sm:px-16">
         <div className="mx-auto w-full max-w-lg space-y-10">
           <div>
             <Logo

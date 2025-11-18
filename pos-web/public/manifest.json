@@ -1,0 +1,21 @@
+{
+  "name": "Kyla Cafe POS System",
+  "short_name": "Kyla POS",
+  "description": "Point of sale platform for cafes - works offline",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#0ea5e9",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/kyla-cafe-system-logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["business", "productivity"],
+  "screenshots": []
+}
+

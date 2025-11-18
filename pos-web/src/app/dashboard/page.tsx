@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 
-import { ProtectedRoute } from "@/components/auth/ProtectedRoute";
+import { RoleProtectedRoute } from "@/components/auth/RoleProtectedRoute";
 import { Logo } from "@/components/branding/Logo";
 import { DashboardNavigation } from "@/components/dashboard/DashboardNavigation";
 import { useAuth } from "@/components/auth/AuthSessionBoundary";
@@ -15,17 +15,30 @@ import {
   fetchDashboardMetrics,
 } from "@/lib/dashboardClient";
 
-const navigationLinks = [
-  { href: "/dashboard", label: "Dashboard" },
-  { href: "/sales-processing", label: "Sales Processing" },
-  { href: "/orders", label: "Orders" },
-  { href: "/inventory-management", label: "Inventory" },
-  { href: "/product-management", label: "Products" },
-];
+const getNavigationLinks = (isSuperAdmin: boolean) => {
+  const baseLinks = [
+    { href: "/dashboard", label: "Dashboard" },
+    { href: "/sales-processing", label: "Sales Processing" },
+    { href: "/orders", label: "Orders" },
+    { href: "/inventory-management", label: "Inventory" },
+    { href: "/product-management", label: "Products" },
+  ];
+
+  if (isSuperAdmin) {
+    return [...baseLinks, { href: "/user-management", label: "Users" }];
+  }
+
+  return baseLinks;
+};
 
 export default function DashboardPage() {
   const router = useRouter();
   const { user } = useAuth();
+  const isSuperAdmin = user?.role === "SUPER_ADMIN";
+  const navigationLinks = useMemo(
+    () => getNavigationLinks(isSuperAdmin),
+    [isSuperAdmin]
+  );
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [isExpiringToken, setIsExpiringToken] = useState(false);
@@ -256,7 +269,7 @@ export default function DashboardPage() {
   };
 
   return (
-    <ProtectedRoute>
+    <RoleProtectedRoute>
       <div className="min-h-screen bg-slate-50">
         <header className="border-b border-slate-200 bg-white">
           <div className="mx-auto flex w-full max-w-6xl flex-col gap-4 px-6 py-4">
@@ -563,6 +576,6 @@ export default function DashboardPage() {
           </section>
         </main>
       </div>
-    </ProtectedRoute>
+    </RoleProtectedRoute>
   );
 }

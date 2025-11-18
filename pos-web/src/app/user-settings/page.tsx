@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 
-import { ProtectedRoute } from "@/components/auth/ProtectedRoute";
+import { RoleProtectedRoute } from "@/components/auth/RoleProtectedRoute";
 import { Logo } from "@/components/branding/Logo";
 import { useAuth } from "@/components/auth/AuthSessionBoundary";
 
@@ -27,7 +27,7 @@ export default function UserSettingsPage() {
   };
 
   return (
-    <ProtectedRoute>
+    <RoleProtectedRoute>
       <div className="min-h-screen bg-slate-50">
         <header className="border-b border-slate-200 bg-white">
           <div className="mx-auto flex w-full max-w-6xl flex-wrap items-center justify-between gap-4 px-6 py-6">
@@ -346,6 +346,6 @@ export default function UserSettingsPage() {
           </section>
         </main>
       </div>
-    </ProtectedRoute>
+    </RoleProtectedRoute>
   );
 }

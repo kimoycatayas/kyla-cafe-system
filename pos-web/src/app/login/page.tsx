@@ -44,7 +44,12 @@ export default function LoginPage() {
         // Session-only tokens can be cleared on tab close using the Storage API if needed.
       }
 
-      router.replace("/dashboard");
+      // Redirect cashiers to sales processing, others to dashboard
+      const redirectPath = response.user.role === "CASHIER" 
+        ? "/sales-processing" 
+        : "/dashboard";
+      
+      router.replace(redirectPath);
       router.refresh();
     } catch (err) {
       if (err instanceof Error) {
@@ -58,45 +63,21 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-slate-50 px-6 py-12">
-      <div className="grid w-full max-w-5xl overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-xl md:grid-cols-[1.1fr,1fr]">
-        <div className="relative hidden bg-linear-to-br from-sky-600 via-sky-500 to-sky-700 p-10 text-white md:flex md:flex-col md:justify-between">
-          <div className="space-y-1">
-            <h1 className="text-3xl font-semibold leading-tight">
-              Smart tools for growing Filipino businesses.
-            </h1>
-            <p className="text-sm text-sky-100">
-              Monitor daily sales, manage multiple branches, and generate
-              peso-ready reports in just a few taps.
-            </p>
-          </div>
-          <div className="mt-2 space-y-4 rounded-2xl bg-white/10 p-6 backdrop-blur">
-            <p className="text-sm font-medium uppercase tracking-wide text-sky-100">
-              Today at a glance
-            </p>
-            <div className="space-y-2 text-sm">
-              <div className="flex items-center justify-between">
-                <span>Gross sales</span>
-                <span className="font-semibold">₱85,420.00</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span>Transactions</span>
-                <span className="font-semibold">312</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span>Top branch</span>
-                <span className="font-semibold">Makati</span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="flex flex-col justify-center gap-10 p-10">
+    <div className="flex min-h-screen items-stretch bg-slate-900">
+      <div className="flex w-full flex-col justify-center bg-white px-8 py-16 sm:px-16">
+        <div className="mx-auto w-full max-w-lg space-y-10">
           <div>
+            <Logo
+              showText
+              size={40}
+              textClassName="text-lg font-semibold text-slate-900"
+              imageClassName="h-10 w-auto"
+              className="mb-6"
+            />
             <p className="text-sm font-medium uppercase tracking-wide text-sky-600">
               Welcome back
             </p>
-            <h2 className="mt-2 text-2xl font-semibold text-slate-900">
+            <h2 className="mt-2 text-3xl font-semibold text-slate-900">
               Log in to your account
             </h2>
             <p className="mt-3 text-sm text-slate-600">

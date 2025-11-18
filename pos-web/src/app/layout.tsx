@@ -2,6 +2,8 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { AuthSessionBoundary } from "@/components/auth/AuthSessionBoundary";
+import { PWAInitializer } from "@/components/PWAInitializer";
+import { OfflineIndicator } from "@/components/OfflineIndicator";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -19,6 +21,19 @@ export const metadata: Metadata = {
     template: "%s | Kyla Cafe System",
   },
   description: "Point of sale platform crafted for growing Philippine cafes.",
+  manifest: "/manifest.json",
+  themeColor: "#0ea5e9",
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "default",
+    title: "Kyla POS",
+  },
+  viewport: {
+    width: "device-width",
+    initialScale: 1,
+    maximumScale: 1,
+    userScalable: false,
+  },
 };
 
 export default function RootLayout({
@@ -31,7 +46,9 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} min-h-screen bg-background font-sans text-foreground antialiased`}
       >
+        <PWAInitializer />
         <AuthSessionBoundary>{children}</AuthSessionBoundary>
+        <OfflineIndicator />
       </body>
     </html>
   );

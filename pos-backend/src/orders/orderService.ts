@@ -1042,10 +1042,14 @@ const ensureManagerApprovalIfRequired = async (
   }
 
   const manager = await ensureUserExists(approvedByManagerId);
-  if (manager.role !== UserRole.MANAGER && manager.role !== UserRole.ADMIN) {
+  if (
+    manager.role !== UserRole.MANAGER &&
+    manager.role !== UserRole.ADMIN &&
+    manager.role !== UserRole.SUPER_ADMIN
+  ) {
     throw new HttpError(
       403,
-      "Only managers or admins can approve this discount."
+      "Only managers, admins, or super admins can approve this discount."
     );
   }
 };

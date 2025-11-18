@@ -148,6 +148,7 @@ const toAuthenticatedUser = (
   email: user.email,
   createdAt: user.createdAt,
   updatedAt: user.updatedAt,
+  role: user.role,
   profile: mapProfile(user.profile ?? null),
 });
 
@@ -222,7 +223,7 @@ export const registerUser = async (
   });
 
   const [accessToken, refreshTokenRecord] = await Promise.all([
-    signAccessToken({ userId: user.id }),
+    signAccessToken({ userId: user.id, role: user.role }),
     createRefreshTokenRecord(prisma, user.id, input),
   ]);
 
@@ -257,7 +258,7 @@ export const loginUser = async (
   }
 
   const [accessToken, refreshTokenRecord] = await Promise.all([
-    signAccessToken({ userId: user.id }),
+    signAccessToken({ userId: user.id, role: user.role }),
     createRefreshTokenRecord(prisma, user.id, input),
   ]);
 
@@ -322,7 +323,7 @@ export const refreshTokens = async (
     return { user: storedToken.user, refreshToken: token };
   });
 
-  const accessToken = await signAccessToken({ userId: user.id });
+  const accessToken = await signAccessToken({ userId: user.id, role: user.role });
 
   return {
     user: toAuthenticatedUser(user),

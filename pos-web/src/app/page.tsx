@@ -32,6 +32,14 @@ export default function Home() {
             real-time analytics, and peso-ready reports included with Kyla Cafe
             System.
           </p>
+          <div className="pt-4">
+            <Link
+              href="/login"
+              className="inline-flex items-center justify-center rounded-full bg-sky-600 px-8 py-3 text-base font-semibold text-white transition hover:bg-sky-700 focus:ring-2 focus:ring-sky-200 focus:ring-offset-2"
+            >
+              Login now
+            </Link>
+          </div>
         </div>
 
         <section className="grid grid-cols-1 gap-6 md:grid-cols-3">

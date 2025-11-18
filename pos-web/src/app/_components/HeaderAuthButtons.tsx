@@ -6,9 +6,7 @@ import Link from "next/link";
 import { authStorage, AUTH_CHANGE_EVENT } from "@/lib/authStorage";
 
 export function HeaderAuthButtons() {
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() =>
-    Boolean(authStorage.getAccessToken())
-  );
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
 
   useEffect(() => {
     const updateAuthState = () => {
