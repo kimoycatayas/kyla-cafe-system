@@ -49,13 +49,19 @@ app.get("/protected-example", authenticateUser, (req, res) => {
 });
 
 // Centralized error handler to keep API responses consistent.
+// Note: SSE connections handle their own errors, so we skip error handling for them
 app.use(
   (
     error: unknown,
-    _req: express.Request,
+    req: express.Request,
     res: express.Response,
     _next: express.NextFunction
   ) => {
+    // Skip error handling for SSE connections (they handle errors themselves)
+    if (req.path.startsWith("/notifications/stream")) {
+      return;
+    }
+
     if (isHttpError(error)) {
       logger.warn("Handled HttpError", { error: serializeError(error) });
       res.status(error.statusCode).json({ error: error.message });

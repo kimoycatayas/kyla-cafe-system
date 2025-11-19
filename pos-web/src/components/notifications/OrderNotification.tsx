@@ -78,12 +78,11 @@ export function OrderNotification() {
         );
       })}
       
-      {/* Connection status indicator (optional, for debugging) */}
-      {process.env.NODE_ENV === "development" && (
-        <div className="text-xs text-slate-500 mt-2">
-          {isConnected ? "🟢 Connected" : "🔴 Disconnected"}
-        </div>
-      )}
+      {/* Connection status indicator (always show for debugging) */}
+      <div className="text-xs text-slate-500 mt-2 px-2">
+        {isConnected ? "🟢 SSE Connected" : "🔴 SSE Disconnected"}
+        {unreadCount > 0 && ` • ${unreadCount} unread`}
+      </div>
     </div>
   );
 }

@@ -32,15 +32,31 @@ class NotificationManager {
 
     // Handle client disconnect
     response.on("close", () => {
+      logger.info("SSE response close event", { connectionId, userId });
       this.removeConnection(connectionId);
     });
 
-    // Send initial connection message
-    this.sendToConnection(connectionId, {
-      type: "connected",
-      message: "Connected to notification stream",
-      timestamp: new Date().toISOString(),
+    response.on("finish", () => {
+      logger.info("SSE response finish event", { connectionId, userId });
+      this.removeConnection(connectionId);
     });
+
+    // Send initial connection message immediately
+    // Use a small delay to ensure connection is fully established
+    setTimeout(() => {
+      try {
+        this.sendToConnection(connectionId, {
+          type: "connected",
+          message: "Connected to notification stream",
+          timestamp: new Date().toISOString(),
+        });
+      } catch (error) {
+        logger.warn("Failed to send initial connection message", {
+          connectionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }, 100);
   }
 
   /**
@@ -149,10 +165,19 @@ class NotificationManager {
 
     const { response } = connection;
     
-    // Format as SSE event
-    const eventData = JSON.stringify(payload);
-    response.write(`event: ${payload.type}\n`);
-    response.write(`data: ${eventData}\n\n`);
+    try {
+      // Format as SSE event
+      const eventData = JSON.stringify(payload);
+      response.write(`event: ${payload.type}\n`);
+      response.write(`data: ${eventData}\n\n`);
+    } catch (error) {
+      logger.warn("Failed to write to SSE connection", {
+        connectionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      // Remove dead connection
+      this.removeConnection(connectionId);
+    }
   }
 
   /**

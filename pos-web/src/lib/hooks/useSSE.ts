@@ -37,13 +37,7 @@ type UseSSEOptions = {
 };
 
 export function useSSE(options: UseSSEOptions = {}) {
-  const {
-    onMessage,
-    onError,
-    onOpen,
-    onClose,
-    enabled = true,
-  } = options;
+  const { onMessage, onError, onOpen, onClose, enabled = true } = options;
 
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<Error | null>(null);
@@ -67,41 +61,61 @@ export function useSSE(options: UseSSEOptions = {}) {
     const connect = () => {
       try {
         // EventSource doesn't support custom headers, so we pass token via query param
-        const url = `${API_BASE_URL}/notifications/stream?token=${encodeURIComponent(token)}`;
-        
+        const url = `${API_BASE_URL}/notifications/stream?token=${encodeURIComponent(
+          token
+        )}`;
+
         const eventSource = new EventSource(url, {
           withCredentials: true,
         });
-        
+
         eventSourceRef.current = eventSource;
 
         eventSource.onopen = () => {
-          console.log("[SSE] Connected to notification stream");
+          console.log("[SSE] Connected to notification stream", {
+            readyState: eventSource.readyState,
+            url: eventSource.url,
+          });
           setIsConnected(true);
           setError(null);
-          reconnectAttemptsRef.current = 0;
+          reconnectAttemptsRef.current = 0; // Reset on successful connection
           onOpen?.();
         };
 
         eventSource.onerror = (err) => {
-          console.error("[SSE] Connection error", err);
-          setError(new Error("SSE connection error"));
-          setIsConnected(false);
-          onError?.(err);
+          const state = eventSource.readyState;
+          console.error("[SSE] Connection error", {
+            readyState: state,
+            // 0 = CONNECTING, 1 = OPEN, 2 = CLOSED
+            state: state === 0 ? "CONNECTING" : state === 1 ? "OPEN" : "CLOSED",
+          });
 
-          // Attempt reconnection
-          if (reconnectAttemptsRef.current < maxReconnectAttempts) {
-            reconnectAttemptsRef.current += 1;
-            console.log(
-              `[SSE] Reconnecting in ${reconnectDelay}ms (attempt ${reconnectAttemptsRef.current}/${maxReconnectAttempts})`
-            );
-            reconnectTimeoutRef.current = setTimeout(() => {
-              eventSource.close();
-              connect();
-            }, reconnectDelay);
-          } else {
-            console.error("[SSE] Max reconnection attempts reached");
-            onClose?.();
+          // Only treat as error if connection is actually closed
+          // EventSource might fire error events during normal operation
+          if (state === EventSource.CLOSED) {
+            setError(new Error("SSE connection closed"));
+            setIsConnected(false);
+            onError?.(err);
+
+            // Attempt reconnection only if connection is actually closed
+            if (reconnectAttemptsRef.current < maxReconnectAttempts) {
+              reconnectAttemptsRef.current += 1;
+              console.log(
+                `[SSE] Reconnecting in ${reconnectDelay}ms (attempt ${reconnectAttemptsRef.current}/${maxReconnectAttempts})`
+              );
+              reconnectTimeoutRef.current = setTimeout(() => {
+                if (eventSourceRef.current) {
+                  eventSourceRef.current.close();
+                }
+                connect();
+              }, reconnectDelay);
+            } else {
+              console.error("[SSE] Max reconnection attempts reached");
+              onClose?.();
+            }
+          } else if (state === EventSource.CONNECTING) {
+            // Connection is still trying to connect, don't treat as error yet
+            console.log("[SSE] Still connecting...");
           }
         };
 
@@ -170,4 +184,3 @@ export function useSSE(options: UseSSEOptions = {}) {
     },
   };
 }
-
