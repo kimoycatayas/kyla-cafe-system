@@ -10,6 +10,7 @@ import prisma from "../lib/prisma";
 import { HttpError } from "../lib/httpError";
 import { buildReceipt } from "./receiptBuilder";
 import type { ReceiptRender } from "./receiptBuilder";
+import { notifyNewOrder } from "../notifications/notificationService";
 
 type Decimalish = number | string | Prisma.Decimal;
 
@@ -595,7 +596,12 @@ export const createOrder = async (
     include: ORDER_INCLUDE,
   });
 
-  return mapOrder(order);
+  const orderResponse = mapOrder(order);
+
+  // Notify connected users about the new order
+  notifyNewOrder(orderResponse);
+
+  return orderResponse;
 };
 
 export const updateOrder = async (
@@ -1425,6 +1431,9 @@ export const createAndFinalizeOrder = async (
       ...receiptDetails,
       printable,
     };
+
+    // Notify connected users about the new order
+    notifyNewOrder(orderResponse);
 
     return {
       order: orderResponse,

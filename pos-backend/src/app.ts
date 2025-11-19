@@ -12,6 +12,7 @@ import orderRouter from "./orders/orderRoutes";
 import productRouter from "./products/productRoutes";
 import dashboardRouter from "./dashboard/dashboardRoutes";
 import userRouter from "./users/userRoutes";
+import sseRouter from "./notifications/sseRoutes";
 
 const app = express();
 
@@ -25,6 +26,7 @@ app.use("/discount-types", discountTypeRouter);
 app.use("/orders", orderRouter);
 app.use("/dashboard", dashboardRouter);
 app.use("/users", userRouter);
+app.use("/notifications", sseRouter);
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok" });
