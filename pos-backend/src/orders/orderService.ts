@@ -312,16 +312,27 @@ const collectInventoryAdjustments = async (
   items: OrderItemPayload[],
   multiplier: number
 ): Promise<InventoryAdjustment[]> => {
+  // Filter items with productId
+  const itemsWithProducts = items.filter((item) => item.productId);
+  if (itemsWithProducts.length === 0) {
+    return [];
+  }
+
+  // Batch fetch all inventory records at once
+  const productIds = itemsWithProducts.map((item) => item.productId!);
+  const inventoryRecords = await client.inventory.findMany({
+    where: { productId: { in: productIds } },
+  });
+
+  // Create a map for quick lookup
+  const inventoryMap = new Map(
+    inventoryRecords.map((inv) => [inv.productId, inv])
+  );
+
   const adjustments: InventoryAdjustment[] = [];
 
-  for (const item of items) {
-    if (!item.productId) {
-      continue;
-    }
-
-    const inventory = await client.inventory.findUnique({
-      where: { productId: item.productId },
-    });
+  for (const item of itemsWithProducts) {
+    const inventory = inventoryMap.get(item.productId!);
 
     if (!inventory) {
       throw new HttpError(
@@ -352,12 +363,21 @@ const applyInventoryAdjustments = async (
   client: PrismaClientOrTransaction,
   adjustments: InventoryAdjustment[]
 ) => {
-  for (const adjustment of adjustments) {
-    await client.inventory.update({
-      where: { id: adjustment.id },
-      data: { quantity: adjustment.quantity },
-    });
+  if (adjustments.length === 0) {
+    return;
   }
+
+  // Batch update inventory using Promise.all for parallel execution
+  // Note: Prisma doesn't support updateMany with different values per row,
+  // so we use parallel individual updates which is still faster than sequential
+  await Promise.all(
+    adjustments.map((adjustment) =>
+      client.inventory.update({
+        where: { id: adjustment.id },
+        data: { quantity: adjustment.quantity },
+      })
+    )
+  );
 };
 
 type PreparedPayment = {
@@ -1203,4 +1223,212 @@ export const removeOrderDiscount = async (
 
   await recalculateOrderTotals(orderId);
   return getOrderById(orderId);
+};
+
+export type CreateAndFinalizeOrderInput = {
+  cashierId: string;
+  items: OrderItemInput[];
+  payments: PaymentInput[];
+};
+
+export type CreateAndFinalizeOrderResponse = {
+  order: OrderResponse;
+  receipt: OrderReceiptResponse;
+};
+
+export const createAndFinalizeOrder = async (
+  input: CreateAndFinalizeOrderInput
+): Promise<CreateAndFinalizeOrderResponse> => {
+  // Pre-fetch cashier outside transaction to reduce transaction time
+  const cashier = await prisma.user.findUnique({
+    where: { id: input.cashierId },
+    include: { profile: true },
+  });
+
+  if (!cashier) {
+    throw new HttpError(404, "Cashier not found.");
+  }
+
+  // Validate items
+  if (!input.items || input.items.length === 0) {
+    throw new HttpError(400, "At least one item is required.");
+  }
+
+  for (const item of input.items) {
+    if (!item.nameSnapshot?.trim()) {
+      throw new HttpError(400, "Item name is required.");
+    }
+    const qty = item.qty;
+    if (!Number.isInteger(qty) || qty <= 0) {
+      throw new HttpError(400, "Quantity must be a positive integer.");
+    }
+  }
+
+  // Validate payments
+  if (!input.payments || input.payments.length === 0) {
+    throw new HttpError(400, "At least one payment is required.");
+  }
+
+  // Prepare order items data for batch insert
+  const itemsData = input.items.map((itemInput) => {
+    const unitPrice = money(itemInput.unitPrice);
+    const discount = itemInput.lineDiscountTotal
+      ? money(itemInput.lineDiscountTotal)
+      : ZERO;
+    const lineSubtotal = unitPrice.mul(itemInput.qty);
+    const lineTotal = lineSubtotal.sub(discount);
+
+    return {
+      productId: itemInput.productId ?? null,
+      nameSnapshot: itemInput.nameSnapshot.trim(),
+      notes: itemInput.notes ?? null,
+      qty: itemInput.qty,
+      unitPrice,
+      lineSubtotal,
+      lineDiscountTotal: discount,
+      lineTotal,
+    };
+  });
+
+  return prisma.$transaction(async (tx) => {
+    // Step 1: Create order
+    const order = await tx.order.create({
+      data: {
+        orderNumber: generateOrderNumber(),
+        cashierId: input.cashierId,
+        status: OrderStatus.OPEN, // Will be updated to PAID at the end
+        subtotal: ZERO,
+        discountTotal: ZERO,
+        totalDue: ZERO,
+        totalPaid: ZERO,
+        changeDue: ZERO,
+      },
+    });
+
+    // Step 2: Batch create all items at once
+    const itemsWithOrderId = itemsData.map((item) => ({
+      ...item,
+      orderId: order.id,
+    }));
+
+    await tx.orderItem.createMany({
+      data: itemsWithOrderId,
+    });
+
+    // Fetch created items for calculations
+    const orderItems = await tx.orderItem.findMany({
+      where: { orderId: order.id },
+    });
+
+    // Step 3: Calculate totals
+    const subtotal = orderItems.reduce(
+      (sum, item) => sum.add(item.lineSubtotal),
+      ZERO
+    );
+
+    const itemDiscount = orderItems.reduce(
+      (sum, item) => sum.add(item.lineDiscountTotal),
+      ZERO
+    );
+
+    // No order-level discounts in this flow (can be added later if needed)
+    const discountTotal = itemDiscount;
+    const totalDue = subtotal.sub(discountTotal);
+
+    // Step 4: Prepare payments
+    const { entries, totalApplied, totalTendered } =
+      await prepareFinalizePayments(tx, input.payments);
+
+    if (totalApplied.lessThan(totalDue)) {
+      throw new HttpError(
+        400,
+        "Total payments must be equal to or greater than the amount due."
+      );
+    }
+
+    // Step 5: Process inventory adjustments
+    const inventoryAdjustments = await collectInventoryAdjustments(
+      tx,
+      orderItems,
+      -1
+    );
+
+    // Step 6: Batch create all payments at once
+    const paymentsData = entries.map((payment) => ({
+      orderId: order.id,
+      method: payment.method,
+      amount: payment.amount,
+      tenderedAmount: payment.tenderedAmount,
+      changeGiven: payment.changeGiven,
+      externalReference: payment.externalReference,
+      processedByUserId: payment.processedByUserId,
+    }));
+
+    await tx.payment.createMany({
+      data: paymentsData,
+    });
+
+    // Step 7: Apply inventory adjustments
+    await applyInventoryAdjustments(tx, inventoryAdjustments);
+
+    // Step 8: Finalize order (update status to PAID)
+    const changeDue = totalTendered.sub(totalDue);
+    const normalizedChangeDue = changeDue.lessThan(ZERO) ? ZERO : changeDue;
+
+    const finalizedOrder = await tx.order.update({
+      where: { id: order.id },
+      data: {
+        status: OrderStatus.PAID,
+        subtotal,
+        discountTotal,
+        totalDue,
+        totalPaid: totalApplied,
+        changeDue: normalizedChangeDue,
+      },
+      include: ORDER_INCLUDE,
+    });
+
+    const orderResponse = mapOrder(finalizedOrder);
+
+    // Step 9: Build receipt (cashier already fetched outside transaction)
+    const cashierName =
+      cashier?.name?.trim() && cashier.name.trim().length > 0
+        ? cashier.name.trim()
+        : input.cashierId;
+
+    const receiptDetails: OrderReceiptDetails = {
+      orderNumber: orderResponse.orderNumber,
+      createdAt: orderResponse.createdAt,
+      status: orderResponse.status,
+      cashierId: orderResponse.cashierId,
+      cashierName,
+      items: orderResponse.items,
+      discounts: orderResponse.discounts,
+      payments: orderResponse.payments,
+      totals: {
+        subtotal: orderResponse.subtotal,
+        discountTotal: orderResponse.discountTotal,
+        totalDue: orderResponse.totalDue,
+        totalPaid: orderResponse.totalPaid,
+        changeDue: orderResponse.changeDue,
+        balanceDue: 0, // Already paid
+      },
+    };
+
+    const printable = buildReceipt({
+      receipt: receiptDetails,
+      cashierName,
+      businessProfile: cashier?.profile ?? null,
+    });
+
+    const receipt: OrderReceiptResponse = {
+      ...receiptDetails,
+      printable,
+    };
+
+    return {
+      order: orderResponse,
+      receipt,
+    };
+  });
 };

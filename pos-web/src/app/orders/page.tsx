@@ -5,7 +5,7 @@ import Link from "next/link";
 
 import { RoleProtectedRoute } from "@/components/auth/RoleProtectedRoute";
 import { Logo } from "@/components/branding/Logo";
-import { fetchOrders, getOrder } from "@/lib/orderClient";
+import { fetchOrders, getOrder, deleteOrder } from "@/lib/orderClient";
 import type { Order, OrderItem } from "@/lib/orderClient";
 import { fetchProducts } from "@/lib/productClient";
 import type { Product } from "@/lib/productClient";
@@ -29,6 +29,7 @@ export default function OrdersPage() {
   const [selectedProductId, setSelectedProductId] = useState<string>("");
   const [dateFrom, setDateFrom] = useState<string>("");
   const [dateTo, setDateTo] = useState<string>("");
+  const [isDeletingOpenOrders, setIsDeletingOpenOrders] = useState(false);
 
   const pesoFormatter = useMemo(
     () =>
@@ -142,6 +143,42 @@ export default function OrdersPage() {
     setOrderItems([]);
   };
 
+  const handleDeleteAllOpenOrders = async () => {
+    const openOrders = allOrders.filter((order) => order.status === "OPEN");
+    
+    if (openOrders.length === 0) {
+      setError("No open orders to delete.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Are you sure you want to delete ${openOrders.length} open order(s)? This action cannot be undone.`
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setIsDeletingOpenOrders(true);
+    setError(null);
+
+    try {
+      // Delete all open orders in parallel
+      await Promise.all(openOrders.map((order) => deleteOrder(order.id)));
+      
+      // Reload orders to refresh the list
+      await loadOrders();
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Failed to delete some orders. Please try again."
+      );
+    } finally {
+      setIsDeletingOpenOrders(false);
+    }
+  };
+
   return (
     <RoleProtectedRoute>
       <div className="min-h-screen bg-slate-50">
@@ -172,6 +209,16 @@ export default function OrdersPage() {
                 className="rounded-full border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 Refresh
+              </button>
+              <button
+                type="button"
+                onClick={handleDeleteAllOpenOrders}
+                disabled={isLoading || isDeletingOpenOrders}
+                className="rounded-full border border-rose-300 bg-white px-4 py-2 text-sm font-semibold text-rose-600 transition hover:border-rose-400 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isDeletingOpenOrders
+                  ? "Deleting…"
+                  : `Delete Open Orders (${allOrders.filter((o) => o.status === "OPEN").length})`}
               </button>
               <Link
                 href="/sales-processing"

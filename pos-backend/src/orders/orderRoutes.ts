@@ -5,6 +5,7 @@ import {
   addOrderItem,
   applyOrderDiscount,
   createOrder,
+  createAndFinalizeOrder,
   deleteOrder,
   finalizeOrder,
   getCheckoutConfig,
@@ -82,6 +83,14 @@ orderRouter.post(
   asyncHandler(async (req, res) => {
     const order = await createOrder(req.body);
     res.status(201).json({ order });
+  })
+);
+
+orderRouter.post(
+  "/create-and-finalize",
+  asyncHandler(async (req, res) => {
+    const result = await createAndFinalizeOrder(req.body);
+    res.status(201).json(result);
   })
 );
 

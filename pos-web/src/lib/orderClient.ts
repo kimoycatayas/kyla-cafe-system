@@ -169,6 +169,12 @@ export type FinalizeOrderPayload = {
   payments: PaymentInput[];
 };
 
+export type CreateAndFinalizeOrderPayload = {
+  cashierId: string;
+  items: AddOrderItemPayload[];
+  payments: PaymentInput[];
+};
+
 export type RefundPaymentInput = {
   method: PaymentMethod;
   amount: number;
@@ -327,4 +333,26 @@ export const refundOrder = async (
     }
   );
   return response.order;
+};
+
+export const deleteOrder = async (orderId: string): Promise<void> => {
+  await apiRequest(`/orders/${orderId}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+    parseJson: false,
+  });
+};
+
+export const createAndFinalizeOrder = async (
+  payload: CreateAndFinalizeOrderPayload
+): Promise<FinalizeOrderResult> => {
+  const response = await apiRequest<FinalizeOrderResult>(
+    "/orders/create-and-finalize",
+    {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify(payload),
+    }
+  );
+  return response;
 };

@@ -2,7 +2,6 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { AuthSessionBoundary } from "@/components/auth/AuthSessionBoundary";
-import { PWAInitializer } from "@/components/PWAInitializer";
 import { OfflineIndicator } from "@/components/OfflineIndicator";
 
 const geistSans = Geist({
@@ -46,7 +45,6 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} min-h-screen bg-background font-sans text-foreground antialiased`}
       >
-        <PWAInitializer />
         <AuthSessionBoundary>{children}</AuthSessionBoundary>
         <OfflineIndicator />
       </body>

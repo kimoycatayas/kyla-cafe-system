@@ -11,31 +11,18 @@ import { expireUserAccessToken, logoutUser } from "@/lib/authClient";
 import { authStorage } from "@/lib/authStorage";
 import {
   CheckoutConfig,
-  FinalizeOrderPayload,
-  Order,
-  OrderItem,
-  OrderSummary,
   PaymentInput,
   PaymentMethod,
   type FinalizeOrderResult,
   type OrderReceipt,
 } from "@/lib/orderClient";
 import type { Product } from "@/lib/productClient";
+import { fetchProducts } from "@/lib/productClient";
 import type { InventoryItem } from "@/lib/inventoryClient";
-// Local-first clients
-import {
-  fetchProductsLocalFirst,
-  fetchOrdersLocalFirst,
-  createOrderLocalFirst,
-  getOrderSummaryLocalFirst,
-  fetchInventoryLocalFirst,
-  fetchCheckoutConfigLocalFirst,
-  addOrderItemLocalFirst,
-  updateOrderItemLocalFirst,
-  removeOrderItemLocalFirst,
-  finalizeOrderLocalFirst,
-  voidOrderLocalFirst,
-} from "@/lib/localStorage/localFirstClient";
+import { fetchInventory } from "@/lib/inventoryClient";
+// Order operations: ONLY used when user clicks "Place Order"
+// createAndFinalizeOrder is the ONLY function called - single API call for everything
+import { fetchCheckoutConfig, createAndFinalizeOrder } from "@/lib/orderClient";
 
 type PaymentFormState = {
   method: PaymentMethod | "";
@@ -48,12 +35,16 @@ type MessageState = {
   feedback: string | null;
 };
 
-const statusStyles: Record<Order["status"], string> = {
-  OPEN: "bg-amber-100 text-amber-700",
-  PAID: "bg-emerald-100 text-emerald-600",
-  VOID: "bg-slate-200 text-slate-600",
-  REFUNDED: "bg-rose-100 text-rose-600",
+type LocalCartItem = {
+  productId: string | null;
+  nameSnapshot: string;
+  notes: string | null;
+  qty: number;
+  unitPrice: number;
+  lineDiscountTotal: number;
 };
+
+// Removed statusStyles - no longer needed without active order display
 
 export default function SalesProcessingPage() {
   const router = useRouter();
@@ -78,11 +69,8 @@ export default function SalesProcessingPage() {
   const [inventoryQuantities, setInventoryQuantities] = useState<
     Record<string, number>
   >({});
-  const [orderItemQuantities, setOrderItemQuantities] = useState<
-    Record<string, number>
-  >({});
-  const orderItemQuantitiesRef = useRef(orderItemQuantities);
-  const [summary, setSummary] = useState<OrderSummary | null>(null);
+  // Cart is always empty on page load - no session persistence
+  const [cartItems, setCartItems] = useState<LocalCartItem[]>([]);
   const [config, setConfig] = useState<CheckoutConfig | null>(null);
   const [paymentForm, setPaymentForm] = useState<PaymentFormState>(() => ({
     method: "",
@@ -95,13 +83,6 @@ export default function SalesProcessingPage() {
   });
   const [isLoading, setIsLoading] = useState(true);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [pendingProductAdds, setPendingProductAdds] = useState<
-    Record<string, number>
-  >({});
-  const pendingProductAddsRef = useRef(pendingProductAdds);
-  const addProductsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null
-  );
 
   const isCashier = user?.role === "CASHIER";
 
@@ -153,30 +134,6 @@ export default function SalesProcessingPage() {
     setMessage({ error: message, feedback: null });
   const clearMessages = () => setMessage({ error: null, feedback: null });
 
-  const updateOrderQuantity = useCallback(
-    (productId: string | null, updater: (current: number) => number) => {
-      if (!productId) {
-        return;
-      }
-
-      setOrderItemQuantities((prev) => {
-        const next = { ...prev };
-        const current = next[productId] ?? 0;
-        const updated = updater(current);
-
-        if (updated <= 0) {
-          delete next[productId];
-        } else {
-          next[productId] = updated;
-        }
-
-        orderItemQuantitiesRef.current = next;
-        return next;
-      });
-    },
-    []
-  );
-
   const getRemainingStock = useCallback(
     (productId: string | null | undefined) => {
       if (!productId) {
@@ -188,12 +145,15 @@ export default function SalesProcessingPage() {
         return 0;
       }
 
-      const committed = orderItemQuantities[productId] ?? 0;
-      const pending = pendingProductAdds[productId] ?? 0;
-      const remaining = baseQuantity - committed - pending;
+      // Calculate how many are in the cart
+      const inCart = cartItems
+        .filter((item) => item.productId === productId)
+        .reduce((sum, item) => sum + item.qty, 0);
+
+      const remaining = baseQuantity - inCart;
       return remaining > 0 ? remaining : 0;
     },
-    [inventoryQuantities, orderItemQuantities, pendingProductAdds]
+    [inventoryQuantities, cartItems]
   );
 
   const resolveDefaultMethod = useCallback((): PaymentMethod | "" => {
@@ -203,65 +163,35 @@ export default function SalesProcessingPage() {
     return config?.paymentMethods?.[0]?.value ?? "";
   }, [config?.paymentMethods, paymentForm.method]);
 
-  const refreshSummary = useCallback(
-    async (orderId: string, preferredMethod?: PaymentMethod | "") => {
-      const summaryResponse = await getOrderSummaryLocalFirst(orderId);
-      setSummary(summaryResponse);
+  // Calculate totals from local cart items
+  const cartTotals = useMemo(() => {
+    const subtotal = cartItems.reduce(
+      (sum, item) => sum + item.unitPrice * item.qty,
+      0
+    );
+    const discountTotal = cartItems.reduce(
+      (sum, item) => sum + item.lineDiscountTotal,
+      0
+    );
+    const totalDue = subtotal - discountTotal;
 
-      const nextCounts = summaryResponse.order.items.reduce<
-        Record<string, number>
-      >((acc, item) => {
-        if (item.productId) {
-          acc[item.productId] = (acc[item.productId] ?? 0) + item.qty;
-        }
-        return acc;
-      }, {});
-      orderItemQuantitiesRef.current = nextCounts;
-      setOrderItemQuantities(nextCounts);
+    return {
+      subtotal,
+      discountTotal,
+      totalDue,
+      totalPaid: 0,
+      changeDue: 0,
+      balanceDue: totalDue,
+    };
+  }, [cartItems]);
 
-      const totalDue = summaryResponse.totals.totalDue;
-      const nextMethod = preferredMethod || resolveDefaultMethod();
-      setPaymentForm((prev) => ({
-        method: nextMethod,
-        amount: totalDue.toFixed(2),
-        tenderedAmount:
-          totalDue > 0
-            ? totalDue.toFixed(2)
-            : prev.tenderedAmount && prev.tenderedAmount.trim().length > 0
-            ? prev.tenderedAmount
-            : "0.00",
-      }));
-
-      return summaryResponse;
-    },
-    [resolveDefaultMethod]
+  const itemCount = useMemo(
+    () => cartItems.reduce((sum, item) => sum + item.qty, 0),
+    [cartItems]
   );
 
-  const loadOrders = useCallback(
-    async (selectOrderId?: string, preferredMethod?: PaymentMethod | "") => {
-      const orderList = await fetchOrdersLocalFirst();
-
-      let targetOrderId = selectOrderId;
-      if (!targetOrderId) {
-        targetOrderId = orderList.find((order) => order.status === "OPEN")?.id;
-      }
-      if (!targetOrderId) {
-        targetOrderId = orderList[0]?.id;
-      }
-
-      if (targetOrderId) {
-        await refreshSummary(targetOrderId, preferredMethod);
-      } else {
-        setSummary(null);
-        orderItemQuantitiesRef.current = {};
-        setOrderItemQuantities({});
-      }
-
-      return orderList;
-    },
-    [refreshSummary]
-  );
-
+  // Initialize checkout: Only loads config, products, and inventory
+  // NO order creation, NO cart restoration, NO session persistence
   const initialiseCheckout = useCallback(async () => {
     if (!user) {
       setErrorMessage("You need to be logged in to process sales.");
@@ -271,13 +201,12 @@ export default function SalesProcessingPage() {
 
     setIsLoading(true);
     try {
-      const [configResponse, productList, inventoryList, orderList] =
-        await Promise.all([
-          fetchCheckoutConfigLocalFirst(),
-          fetchProductsLocalFirst(),
-          fetchInventoryLocalFirst(),
-          fetchOrdersLocalFirst(),
-        ]);
+      // Only load essential data - no orders, no cart state
+      const [configResponse, productList, inventoryList] = await Promise.all([
+        fetchCheckoutConfig(),
+        fetchProducts(),
+        fetchInventory(),
+      ]);
 
       setConfig(configResponse);
       setProducts(productList);
@@ -290,16 +219,10 @@ export default function SalesProcessingPage() {
 
       const defaultMethod =
         configResponse.paymentMethods[0]?.value ?? ("" as PaymentMethod | "");
-      let targetOrder = orderList.find((order) => order.status === "OPEN");
-
-      if (!targetOrder) {
-        targetOrder = await createOrderLocalFirst({ cashierId: user.id });
-        orderList.unshift(targetOrder);
-      }
-
-      if (targetOrder) {
-        await refreshSummary(targetOrder.id, defaultMethod);
-      }
+      setPaymentForm((prev) => ({
+        ...prev,
+        method: defaultMethod,
+      }));
     } catch (err) {
       setErrorMessage(
         err instanceof Error
@@ -309,10 +232,12 @@ export default function SalesProcessingPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [refreshSummary, user]);
+  }, [user]);
 
   const hasInitialisedRef = useRef(false);
 
+  // Initialize on mount: Only loads config/products/inventory
+  // NEVER creates orders, NEVER restores cart, NEVER calls /orders endpoints
   useEffect(() => {
     if (hasInitialisedRef.current) {
       return;
@@ -321,166 +246,21 @@ export default function SalesProcessingPage() {
     void initialiseCheckout();
   }, [initialiseCheckout]);
 
+  // Update payment form when cart totals change
   useEffect(() => {
-    orderItemQuantitiesRef.current = orderItemQuantities;
-  }, [orderItemQuantities]);
-
-  useEffect(() => {
-    pendingProductAddsRef.current = pendingProductAdds;
-  }, [pendingProductAdds]);
-
-  const activeOrder = summary?.order ?? null;
-
-  const flushPendingProductAdds = useCallback(async () => {
-    if (addProductsTimerRef.current) {
-      clearTimeout(addProductsTimerRef.current);
-      addProductsTimerRef.current = null;
+    if (cartTotals.totalDue > 0) {
+      setPaymentForm((prev) => ({
+        ...prev,
+        amount: cartTotals.totalDue.toFixed(2),
+        tenderedAmount:
+          prev.method === "CASH" && cartTotals.totalDue > 0
+            ? cartTotals.totalDue.toFixed(2)
+            : prev.tenderedAmount,
+      }));
     }
-
-    const queued = pendingProductAddsRef.current;
-    if (!queued || Object.keys(queued).length === 0) {
-      return;
-    }
-
-    if (!activeOrder) {
-      setPendingProductAdds({});
-      pendingProductAddsRef.current = {};
-      return;
-    }
-
-    setPendingProductAdds({});
-    pendingProductAddsRef.current = {};
-
-    clearMessages();
-    setIsProcessing(true);
-    try {
-      const orderId = activeOrder.id;
-      const additions = Object.entries(queued);
-      const limitedProducts = new Set<string>();
-
-      for (const [productId, quantity] of additions) {
-        const product = products.find((item) => item.id === productId);
-        if (!product) {
-          continue;
-        }
-
-        const baseQuantity = inventoryQuantities[product.id];
-        if (typeof baseQuantity !== "number") {
-          limitedProducts.add(product.name);
-          continue;
-        }
-
-        const committed = orderItemQuantitiesRef.current[product.id] ?? 0;
-        const available = baseQuantity - committed;
-        if (available <= 0) {
-          limitedProducts.add(product.name);
-          continue;
-        }
-
-        const allowedQty = Math.min(quantity, available);
-        if (allowedQty < quantity) {
-          limitedProducts.add(product.name);
-        }
-        if (allowedQty <= 0) {
-          continue;
-        }
-
-        await addOrderItemLocalFirst(orderId, {
-          productId: product.id,
-          nameSnapshot: product.name,
-          qty: allowedQty,
-          unitPrice: product.price,
-          lineDiscountTotal: 0,
-        });
-
-        updateOrderQuantity(product.id, (current) => current + allowedQty);
-      }
-
-      await refreshSummary(orderId, paymentForm.method);
-      if (limitedProducts.size > 0) {
-        setFeedbackMessage(
-          `Cart updated. Limited stock for: ${Array.from(limitedProducts).join(
-            ", "
-          )}.`
-        );
-      } else {
-        setFeedbackMessage("Cart updated.");
-      }
-    } catch (err) {
-      setPendingProductAdds(queued);
-      pendingProductAddsRef.current = queued;
-      setErrorMessage(
-        err instanceof Error
-          ? err.message
-          : "We couldn’t update the cart. Please try again."
-      );
-    } finally {
-      setIsProcessing(false);
-    }
-  }, [
-    activeOrder?.id,
-    clearMessages,
-    inventoryQuantities,
-    paymentForm.method,
-    products,
-    refreshSummary,
-    setFeedbackMessage,
-    setErrorMessage,
-    updateOrderQuantity,
-  ]);
-
-  useEffect(() => {
-    return () => {
-      if (addProductsTimerRef.current) {
-        clearTimeout(addProductsTimerRef.current);
-      }
-    };
-  }, []);
-
-  const ensureActiveOrder = () => {
-    if (!user) {
-      setErrorMessage("No logged-in cashier found.");
-      return null;
-    }
-    if (!activeOrder) {
-      setErrorMessage("There is no active order at the moment.");
-      return null;
-    }
-    return { userId: user.id, order: activeOrder };
-  };
-
-  const handleCreateOrder = async () => {
-    if (!user) {
-      setErrorMessage("No logged-in cashier found.");
-      return;
-    }
-
-    await flushPendingProductAdds();
-
-    clearMessages();
-    setIsProcessing(true);
-
-    try {
-      const newOrder = await createOrderLocalFirst({ cashierId: user.id });
-      await loadOrders(newOrder.id, paymentForm.method);
-      setFeedbackMessage("New order created. Ready to add items.");
-    } catch (err) {
-      setErrorMessage(
-        err instanceof Error
-          ? err.message
-          : "Unable to create a new order right now."
-      );
-    } finally {
-      setIsProcessing(false);
-    }
-  };
+  }, [cartTotals.totalDue]);
 
   const handleAddProduct = (product: Product) => {
-    if (!activeOrder) {
-      setErrorMessage("There is no active order at the moment.");
-      return;
-    }
-
     const remainingStock = getRemainingStock(product.id);
     if (remainingStock <= 0) {
       setErrorMessage(
@@ -490,189 +270,144 @@ export default function SalesProcessingPage() {
     }
 
     clearMessages();
-    setPendingProductAdds((prev) => {
-      const next = { ...prev, [product.id]: (prev[product.id] ?? 0) + 1 };
+
+    // Find existing item in cart
+    const existingItemIndex = cartItems.findIndex(
+      (item) => item.productId === product.id
+    );
+
+    if (existingItemIndex >= 0) {
+      // Update quantity
+      setCartItems((prev) => {
+        const next = [...prev];
+        const existing = next[existingItemIndex];
+        if (existing) {
+          next[existingItemIndex] = {
+            ...existing,
+            qty: existing.qty + 1,
+          };
+        }
+        return next;
+      });
+    } else {
+      // Add new item
+      const newItem: LocalCartItem = {
+        productId: product.id,
+        nameSnapshot: product.name,
+        notes: null,
+        qty: 1,
+        unitPrice: product.price,
+        lineDiscountTotal: 0,
+      };
+      setCartItems((prev) => [...prev, newItem]);
+    }
+
+    setFeedbackMessage(`${product.name} added to cart.`);
+  };
+
+  const handleAdjustQuantity = (item: LocalCartItem, delta: number) => {
+    const itemIndex = cartItems.findIndex(
+      (i) =>
+        i.productId === item.productId && i.nameSnapshot === item.nameSnapshot
+    );
+
+    if (itemIndex < 0) return;
+
+    const currentQty = item.qty;
+    const nextQty = currentQty + delta;
+
+    if (nextQty <= 0) {
+      handleRemoveItem(item);
+      return;
+    }
+
+    // Check stock availability
+    if (item.productId) {
+      const remainingStock = getRemainingStock(item.productId);
+      const currentInCart = cartItems
+        .filter((i) => i.productId === item.productId)
+        .reduce((sum, i) => sum + i.qty, 0);
+      const available = remainingStock + currentQty; // Add back current qty
+
+      if (nextQty > available) {
+        setFeedbackMessage("Not enough stock available for this item.");
+        return;
+      }
+    }
+
+    clearMessages();
+    setCartItems((prev) => {
+      const next = [...prev];
+      const existing = next[itemIndex];
+      if (existing) {
+        next[itemIndex] = {
+          ...existing,
+          qty: nextQty,
+        };
+      }
       return next;
     });
-
-    pendingProductAddsRef.current = {
-      ...pendingProductAddsRef.current,
-      [product.id]: (pendingProductAddsRef.current[product.id] ?? 0) + 1,
-    };
-
-    if (addProductsTimerRef.current) {
-      clearTimeout(addProductsTimerRef.current);
-    }
-
-    addProductsTimerRef.current = setTimeout(() => {
-      void flushPendingProductAdds();
-    }, 350);
+    setFeedbackMessage("Item quantity updated.");
   };
 
-  const handleAdjustQuantity = async (item: OrderItem, delta: number) => {
-    const context = ensureActiveOrder();
-    if (!context || !activeOrder) return;
-
-    // Find all items in the same group (same productId or nameSnapshot)
-    const groupKey = item.productId ?? `name:${item.nameSnapshot}`;
-    const groupedItems = activeOrder.items.filter(
-      (i) => (i.productId ?? `name:${i.nameSnapshot}`) === groupKey
+  const handleRemoveItem = (item: LocalCartItem) => {
+    clearMessages();
+    setCartItems((prev) =>
+      prev.filter(
+        (i) =>
+          !(
+            i.productId === item.productId &&
+            i.nameSnapshot === item.nameSnapshot
+          )
+      )
     );
-
-    // Calculate total current quantity for the group
-    const currentTotalQty = groupedItems.reduce((sum, i) => sum + i.qty, 0);
-    const nextQtyRaw = currentTotalQty + delta;
-
-    if (nextQtyRaw <= 0) {
-      // Remove all items in the group
-      await handleRemoveItem(item);
-      return;
-    }
-
-    // Calculate how to distribute the new quantity
-    // We'll update the first item with the new total quantity and remove the rest
-    let targetQty = nextQtyRaw;
-    if (item.productId) {
-      const baseQuantity = inventoryQuantities[item.productId];
-      if (typeof baseQuantity === "number") {
-        const committed = orderItemQuantitiesRef.current[item.productId] ?? 0;
-        const otherQty = committed - currentTotalQty;
-        const maxAllowed = Math.max(baseQuantity - otherQty, 0);
-        targetQty = Math.min(targetQty, maxAllowed);
-      }
-    }
-
-    if (targetQty <= 0) {
-      await handleRemoveItem(item);
-      return;
-    }
-
-    if (targetQty === currentTotalQty) {
-      setFeedbackMessage("No additional stock available for this item.");
-      return;
-    }
-
-    await flushPendingProductAdds();
-
-    clearMessages();
-    setIsProcessing(true);
-    try {
-      // Update the first item with the new total quantity
-      await updateOrderItemLocalFirst(context.order.id, item.id, {
-        qty: targetQty,
-      });
-
-      // Remove all other items in the group
-      const otherItems = groupedItems.filter((i) => i.id !== item.id);
-      for (const otherItem of otherItems) {
-        await removeOrderItemLocalFirst(context.order.id, otherItem.id);
-      }
-
-      updateOrderQuantity(item.productId, () => targetQty);
-      await refreshSummary(context.order.id, paymentForm.method);
-      setFeedbackMessage("Item quantity updated.");
-    } catch (err) {
-      setErrorMessage(
-        err instanceof Error ? err.message : "Unable to update item quantity."
-      );
-    } finally {
-      setIsProcessing(false);
-    }
+    setFeedbackMessage(`${item.nameSnapshot} removed from cart.`);
   };
 
-  const handleRemoveItem = async (item: OrderItem) => {
-    const context = ensureActiveOrder();
-    if (!context || !activeOrder) return;
-
-    // Find all items in the same group (same productId or nameSnapshot)
-    const groupKey = item.productId ?? `name:${item.nameSnapshot}`;
-    const groupedItems = activeOrder.items.filter(
-      (i) => (i.productId ?? `name:${i.nameSnapshot}`) === groupKey
-    );
-
-    await flushPendingProductAdds();
-
-    clearMessages();
-    setIsProcessing(true);
-    try {
-      // Remove all items in the group
-      for (const groupItem of groupedItems) {
-        await removeOrderItemLocalFirst(context.order.id, groupItem.id);
-      }
-      await refreshSummary(context.order.id, paymentForm.method);
-      setFeedbackMessage(`${item.nameSnapshot} removed from the order.`);
-    } catch (err) {
-      setErrorMessage(
-        err instanceof Error
-          ? err.message
-          : "Unable to remove the item right now."
-      );
-    } finally {
-      setIsProcessing(false);
-    }
-  };
-
-  const handleVoidOrder = async () => {
-    const context = ensureActiveOrder();
-    if (!context) return;
-
-    await flushPendingProductAdds();
-
-    clearMessages();
-    setIsProcessing(true);
-    try {
-      await voidOrderLocalFirst(context.order.id);
-      await loadOrders(context.order.id, paymentForm.method);
-      setFeedbackMessage("Order voided. Create a new order when ready.");
-    } catch (err) {
-      setErrorMessage(
-        err instanceof Error
-          ? err.message
-          : "Unable to void the order right now."
-      );
-    } finally {
-      setIsProcessing(false);
-    }
-  };
-
+  // ONLY function that creates orders - called when user clicks "Place Order"
+  // Single API call: creates order + adds items + finalizes in one transaction
+  // NO orders are created on page load, refresh, or any other time
   const handleFinalizeOrder = async () => {
-    const context = ensureActiveOrder();
-    if (!context) return;
+    if (!user) {
+      setErrorMessage("No logged-in cashier found.");
+      return;
+    }
 
     if (!paymentForm.method) {
       setErrorMessage("Select a payment method before finalising.");
       return;
     }
 
-    if (!summary || summary.totals.totalDue <= 0) {
+    if (cartItems.length === 0) {
+      setErrorMessage("Cart is empty. Add items before placing order.");
+      return;
+    }
+
+    const totalDue = cartTotals.totalDue;
+    if (totalDue <= 0) {
       setErrorMessage("Order total must be greater than zero.");
       return;
     }
 
-    await flushPendingProductAdds();
-
-    clearMessages();
-    setIsProcessing(true);
-
-    const totalDue = summary.totals.totalDue;
     const tenderedAmount = Number(paymentForm.tenderedAmount) || totalDue;
 
     if (tenderedAmount < totalDue) {
       setErrorMessage("Tendered amount cannot be less than the amount due.");
-      setIsProcessing(false);
       return;
     }
 
-    const payload: FinalizeOrderPayload = {
-      payments: [
-        {
-          method: paymentForm.method,
-          amount: totalDue,
-          tenderedAmount: tenderedAmount,
-          processedByUserId: context.userId,
-        } satisfies PaymentInput,
-      ],
-    };
+    clearMessages();
+    setIsProcessing(true);
+
+    // Capture cart items snapshot to prevent issues if state changes during processing
+    const itemsToAdd = [...cartItems];
+    const savedTotalDue = totalDue;
+    const savedTenderedAmount = tenderedAmount;
+
+    // Optimistic UI update: Clear cart immediately for better perceived performance
+    // If request fails, we'll restore it in the catch block
+    setCartItems([]);
+    setFeedbackMessage("Processing order...");
 
     const triggerReceiptDownload = (receipt: OrderReceipt) => {
       if (typeof window === "undefined") return;
@@ -694,50 +429,54 @@ export default function SalesProcessingPage() {
     };
 
     try {
-      const result: FinalizeOrderResult = await finalizeOrderLocalFirst(
-        context.order.id,
-        payload
-      );
-      triggerReceiptDownload(result.receipt);
+      // Single API call: create order + add items + finalize in one transaction
+      const payload = {
+        cashierId: user.id,
+        items: itemsToAdd.map((item) => ({
+          productId: item.productId,
+          nameSnapshot: item.nameSnapshot,
+          notes: item.notes,
+          qty: item.qty,
+          unitPrice: item.unitPrice,
+          lineDiscountTotal: item.lineDiscountTotal,
+        })),
+        payments: [
+          {
+            method: paymentForm.method,
+            amount: savedTotalDue,
+            tenderedAmount: savedTenderedAmount,
+            processedByUserId: user.id,
+          } satisfies PaymentInput,
+        ],
+      };
+
+      const result: FinalizeOrderResult = await createAndFinalizeOrder(payload);
+
+      // Trigger receipt download immediately (non-blocking)
+      // Use setTimeout to ensure UI updates first
+      setTimeout(() => {
+        triggerReceiptDownload(result.receipt);
+      }, 0);
 
       // Show success modal with payment details
+      const changeAmount = savedTenderedAmount - savedTotalDue;
       setSuccessOrderData({
-        total: totalDue,
-        cashReceived: tenderedAmount,
+        total: savedTotalDue,
+        cashReceived: savedTenderedAmount,
         change: changeAmount,
         orderNumber: result.receipt.orderNumber,
       });
       setShowSuccessModal(true);
-
-      await loadOrders(context.order.id, paymentForm.method);
+      setFeedbackMessage("Order placed successfully!");
     } catch (err) {
+      // Restore cart on error so user can retry
+      setCartItems(itemsToAdd);
       setErrorMessage(
         err instanceof Error
           ? err.message
           : "Unable to finalise the order. Please try again."
       );
-    } finally {
-      setIsProcessing(false);
-    }
-  };
-
-  const handleRefreshSummary = async () => {
-    const context = ensureActiveOrder();
-    if (!context) return;
-
-    await flushPendingProductAdds();
-
-    clearMessages();
-    setIsProcessing(true);
-    try {
-      await refreshSummary(context.order.id, paymentForm.method);
-      setFeedbackMessage("Order details refreshed.");
-    } catch (err) {
-      setErrorMessage(
-        err instanceof Error
-          ? err.message
-          : "Unable to refresh the order details right now."
-      );
+      setFeedbackMessage("");
     } finally {
       setIsProcessing(false);
     }
@@ -832,7 +571,7 @@ export default function SalesProcessingPage() {
 
   const paymentMethods = config?.paymentMethods ?? [];
 
-  const totalDue = summary?.totals.totalDue ?? 0;
+  const totalDue = cartTotals.totalDue;
   const tenderedAmount = Number(paymentForm.tenderedAmount) || 0;
   const changeAmount = tenderedAmount > 0 ? tenderedAmount - totalDue : 0;
 
@@ -899,55 +638,8 @@ export default function SalesProcessingPage() {
               </div>
             </div>
 
-            {/* Second Row: Order Info and Actions */}
+            {/* Second Row: Actions */}
             <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-              {/* Order Info */}
-              {activeOrder && (
-                <>
-                  <span
-                    className={`rounded-full px-2 py-1 text-xs font-semibold sm:px-3 ${
-                      statusStyles[activeOrder.status]
-                    }`}
-                  >
-                    <span className="hidden sm:inline">
-                      {activeOrder.orderNumber}
-                    </span>
-                    <span className="sm:hidden">
-                      {activeOrder.orderNumber.split("-")[1]}
-                    </span>
-                  </span>
-                  <button
-                    type="button"
-                    onClick={handleRefreshSummary}
-                    disabled={isProcessing}
-                    className="rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 sm:px-3"
-                  >
-                    Refresh
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleVoidOrder}
-                    disabled={
-                      isProcessing ||
-                      !activeOrder ||
-                      activeOrder.status !== "OPEN"
-                    }
-                    className="rounded-lg border border-rose-300 bg-white px-2 py-1.5 text-xs font-semibold text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60 sm:px-3"
-                  >
-                    Void
-                  </button>
-                </>
-              )}
-
-              {/* Actions */}
-              <button
-                type="button"
-                onClick={handleCreateOrder}
-                disabled={isProcessing || !user}
-                className="rounded-lg bg-sky-600 px-3 py-2 text-xs font-semibold text-white transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-70 sm:px-4 sm:text-sm"
-              >
-                {isProcessing ? "Working…" : "New Order"}
-              </button>
               {!isCashier && (
                 <>
                   <Link
@@ -1069,15 +761,17 @@ export default function SalesProcessingPage() {
               ) : (
                 <div className="grid grid-cols-2 gap-3 sm:grid-cols-2 sm:gap-4 lg:grid-cols-3 xl:grid-cols-4">
                   {products.map((product) => {
-                    const queuedCount = pendingProductAdds[product.id] ?? 0;
                     const stockLevel = getRemainingStock(product.id);
                     const isOutOfStock = stockLevel <= 0;
+                    const inCartQty = cartItems
+                      .filter((item) => item.productId === product.id)
+                      .reduce((sum, item) => sum + item.qty, 0);
                     return (
                       <button
                         key={product.id}
                         type="button"
                         onClick={() => handleAddProduct(product)}
-                        disabled={!activeOrder || isOutOfStock}
+                        disabled={isOutOfStock}
                         className="group flex flex-col gap-2 rounded-xl border border-slate-200 bg-white p-3 text-left shadow-sm transition-all hover:-translate-y-1 hover:border-sky-300 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0 sm:p-4"
                       >
                         <div className="flex items-start justify-between gap-2">
@@ -1108,9 +802,9 @@ export default function SalesProcessingPage() {
                             </span>
                           )}
                         </div>
-                        {queuedCount > 0 && (
+                        {inCartQty > 0 && (
                           <div className="rounded-lg bg-sky-50 px-2 py-1 text-xs font-semibold text-sky-700">
-                            Queued ×{queuedCount}
+                            In cart ×{inCartQty}
                           </div>
                         )}
                       </button>
@@ -1129,7 +823,7 @@ export default function SalesProcessingPage() {
                   Current Cart
                 </h2>
                 <p className="text-xs text-slate-500">
-                  {summary ? `${summary.itemCount} item(s)` : "No items"}
+                  {itemCount > 0 ? `${itemCount} item(s)` : "No items"}
                 </p>
               </div>
 
@@ -1138,7 +832,7 @@ export default function SalesProcessingPage() {
                   <div className="flex items-center justify-center rounded-xl border border-dashed border-slate-200 px-4 py-8 text-sm text-slate-500">
                     Loading cart…
                   </div>
-                ) : !activeOrder || activeOrder.items.length === 0 ? (
+                ) : cartItems.length === 0 ? (
                   <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-slate-200 px-4 py-12 text-center">
                     <p className="text-sm font-medium text-slate-500">
                       No Item Selected
@@ -1149,118 +843,69 @@ export default function SalesProcessingPage() {
                   </div>
                 ) : (
                   <div className="space-y-3">
-                    {(() => {
-                      // Group items by productId (or nameSnapshot if productId is null)
-                      const groupedItems = activeOrder.items.reduce<
-                        Map<
-                          string,
-                          {
-                            items: OrderItem[];
-                            totalQty: number;
-                            totalLineSubtotal: number;
-                            totalLineDiscount: number;
-                            totalLineTotal: number;
-                          }
+                    {cartItems.map((item, index) => {
+                      const lineSubtotal = item.unitPrice * item.qty;
+                      const lineTotal = lineSubtotal - item.lineDiscountTotal;
+
+                      return (
+                        <div
+                          key={`${
+                            item.productId ?? item.nameSnapshot
+                          }-${index}`}
+                          className="flex items-start justify-between gap-3 rounded-lg border border-slate-200 bg-white p-3 transition hover:border-sky-200"
                         >
-                      >((groups, item) => {
-                        const key =
-                          item.productId ?? `name:${item.nameSnapshot}`;
-                        const existing = groups.get(key);
-
-                        if (existing) {
-                          existing.items.push(item);
-                          existing.totalQty += item.qty;
-                          existing.totalLineSubtotal += item.lineSubtotal;
-                          existing.totalLineDiscount += item.lineDiscountTotal;
-                          existing.totalLineTotal += item.lineTotal;
-                        } else {
-                          groups.set(key, {
-                            items: [item],
-                            totalQty: item.qty,
-                            totalLineSubtotal: item.lineSubtotal,
-                            totalLineDiscount: item.lineDiscountTotal,
-                            totalLineTotal: item.lineTotal,
-                          });
-                        }
-
-                        return groups;
-                      }, new Map());
-
-                      return Array.from(groupedItems.values()).map(
-                        (group, index) => {
-                          const firstItem = group.items[0]!;
-                          const groupKey =
-                            firstItem.productId ??
-                            `name:${firstItem.nameSnapshot}`;
-
-                          return (
-                            <div
-                              key={groupKey}
-                              className="flex items-start justify-between gap-3 rounded-lg border border-slate-200 bg-white p-3 transition hover:border-sky-200"
-                            >
-                              <div className="flex-1">
-                                <p className="text-sm font-semibold text-slate-900">
-                                  {firstItem.nameSnapshot}
-                                </p>
-                                <div className="mt-2 flex items-center gap-2">
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      handleAdjustQuantity(firstItem, -1)
-                                    }
-                                    disabled={isProcessing}
-                                    className="flex h-8 w-8 items-center justify-center rounded border border-slate-300 bg-white text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 sm:h-6 sm:w-6 sm:text-xs"
-                                  >
-                                    −
-                                  </button>
-                                  <span className="min-w-8 text-center text-xs font-semibold text-slate-700">
-                                    {group.totalQty}
-                                  </span>
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      handleAdjustQuantity(firstItem, 1)
-                                    }
-                                    disabled={
-                                      isProcessing ||
-                                      (firstItem.productId
-                                        ? getRemainingStock(
-                                            firstItem.productId
-                                          ) <= 0
-                                        : false)
-                                    }
-                                    className="flex h-8 w-8 items-center justify-center rounded border border-slate-300 bg-white text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 sm:h-6 sm:w-6 sm:text-xs"
-                                  >
-                                    +
-                                  </button>
-                                </div>
-                              </div>
-                              <div className="text-right">
-                                <p className="text-sm font-semibold text-slate-900">
-                                  {pesoFormatter.format(group.totalLineTotal)}
-                                </p>
-                                {group.totalLineDiscount > 0 && (
-                                  <p className="text-xs text-emerald-600">
-                                    −
-                                    {pesoFormatter.format(
-                                      group.totalLineDiscount
-                                    )}
-                                  </p>
-                                )}
-                                <button
-                                  type="button"
-                                  onClick={() => handleRemoveItem(firstItem)}
-                                  disabled={isProcessing}
-                                  className="mt-1 text-xs font-medium text-rose-600 transition hover:text-rose-700 disabled:cursor-not-allowed disabled:opacity-60"
-                                >
-                                  Remove
-                                </button>
-                              </div>
+                          <div className="flex-1">
+                            <p className="text-sm font-semibold text-slate-900">
+                              {item.nameSnapshot}
+                            </p>
+                            <div className="mt-2 flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => handleAdjustQuantity(item, -1)}
+                                disabled={isProcessing}
+                                className="flex h-8 w-8 items-center justify-center rounded border border-slate-300 bg-white text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 sm:h-6 sm:w-6 sm:text-xs"
+                              >
+                                −
+                              </button>
+                              <span className="min-w-8 text-center text-xs font-semibold text-slate-700">
+                                {item.qty}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => handleAdjustQuantity(item, 1)}
+                                disabled={
+                                  isProcessing ||
+                                  (item.productId
+                                    ? getRemainingStock(item.productId) <= 0
+                                    : false)
+                                }
+                                className="flex h-8 w-8 items-center justify-center rounded border border-slate-300 bg-white text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 sm:h-6 sm:w-6 sm:text-xs"
+                              >
+                                +
+                              </button>
                             </div>
-                          );
-                        }
+                          </div>
+                          <div className="text-right">
+                            <p className="text-sm font-semibold text-slate-900">
+                              {pesoFormatter.format(lineTotal)}
+                            </p>
+                            {item.lineDiscountTotal > 0 && (
+                              <p className="text-xs text-emerald-600">
+                                −{pesoFormatter.format(item.lineDiscountTotal)}
+                              </p>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveItem(item)}
+                              disabled={isProcessing}
+                              className="mt-1 text-xs font-medium text-rose-600 transition hover:text-rose-700 disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        </div>
                       );
-                    })()}
+                    })}
                   </div>
                 )}
               </div>
@@ -1272,18 +917,13 @@ export default function SalesProcessingPage() {
                 <div className="flex items-center justify-between text-sm">
                   <span className="text-slate-600">Subtotal</span>
                   <span className="font-semibold text-slate-900">
-                    {summary
-                      ? pesoFormatter.format(summary.totals.subtotal)
-                      : pesoFormatter.format(0)}
+                    {pesoFormatter.format(cartTotals.subtotal)}
                   </span>
                 </div>
                 <div className="flex items-center justify-between text-sm">
                   <span className="text-slate-600">Discounts</span>
                   <span className="font-semibold text-emerald-600">
-                    −
-                    {summary
-                      ? pesoFormatter.format(summary.totals.discountTotal)
-                      : pesoFormatter.format(0)}
+                    −{pesoFormatter.format(cartTotals.discountTotal)}
                   </span>
                 </div>
                 <div className="flex items-center justify-between border-t border-slate-200 pt-3">
@@ -1291,7 +931,7 @@ export default function SalesProcessingPage() {
                     TOTAL
                   </span>
                   <span className="text-lg font-bold text-slate-900">
-                    {pesoFormatter.format(totalDue)}
+                    {pesoFormatter.format(cartTotals.totalDue)}
                   </span>
                 </div>
               </div>
@@ -1345,7 +985,7 @@ export default function SalesProcessingPage() {
                           }))
                         }
                         className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-base font-semibold text-slate-900 outline-none transition focus:border-sky-500 focus:ring-2 focus:ring-sky-200 sm:py-2"
-                        disabled={isProcessing || !activeOrder}
+                        disabled={isProcessing || cartItems.length === 0}
                         placeholder={totalDue.toFixed(2)}
                       />
                     </label>
@@ -1376,9 +1016,8 @@ export default function SalesProcessingPage() {
                   onClick={handleFinalizeOrder}
                   disabled={
                     isProcessing ||
-                    !activeOrder ||
                     !paymentForm.method ||
-                    activeOrder.items.length === 0 ||
+                    cartItems.length === 0 ||
                     totalDue <= 0 ||
                     (paymentForm.method === "CASH" && changeAmount < 0)
                   }
