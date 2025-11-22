@@ -1,6 +1,6 @@
 # Kyla Cafe System
 
-A modern Point of Sale (POS) system built for growing Philippine cafes and businesses. This monorepo contains both the backend API and frontend web application, providing a complete solution for sales processing, inventory management, product management, and business analytics.
+A modern Point of Sale (POS) system built for growing Philippine cafes and businesses. This monorepo contains the backend API, web frontend application, and mobile app, providing a complete solution for sales processing, inventory management, product management, and business analytics.
 
 ## 🚀 Features
 
@@ -25,12 +25,19 @@ A modern Point of Sale (POS) system built for growing Philippine cafes and busin
 - **Testing**: Vitest
 - **Language**: TypeScript
 
-### Frontend (`pos-web`)
+### Web Frontend (`pos-web`)
 
 - **Framework**: Next.js 16 with React 19
 - **Styling**: Tailwind CSS 4
 - **Language**: TypeScript
 - **State Management**: React Hooks
+
+### Mobile App (`pos-mobile`)
+
+- **Framework**: React Native with Expo
+- **Language**: TypeScript
+- **Platform**: iOS, Android, and Web
+- **Development**: Expo Go for rapid development
 
 ## 📋 Prerequisites
 
@@ -152,14 +159,44 @@ touch .env.local
 NEXT_PUBLIC_API_URL=http://localhost:4000
 ```
 
-### Step 7: Install Frontend Dependencies
+### Step 7: Install Web Frontend Dependencies
 
 ```bash
 # Make sure you're in pos-web directory
 npm install
 ```
 
-### Step 8: Start the Development Servers
+### Step 8: Configure Mobile App (Optional)
+
+1. **Navigate to the mobile app directory**:
+
+```bash
+cd ../pos-mobile
+```
+
+2. **Create a `.env` file**:
+
+```bash
+# Create .env file
+touch .env
+```
+
+3. **Add the backend API URL to `.env`**:
+
+```env
+EXPO_PUBLIC_API_URL=http://localhost:4000
+```
+
+**Note**: For physical devices, replace `localhost` with your computer's IP address (e.g., `http://192.168.1.xxx:4000`)
+
+4. **Install mobile app dependencies**:
+
+```bash
+# Make sure you're in pos-mobile directory
+npm install
+```
+
+### Step 9: Start the Development Servers
 
 You'll need to run both the backend and frontend servers. Open two terminal windows:
 
@@ -179,9 +216,21 @@ cd pos-web
 npm run dev
 ```
 
-The frontend application will start on `http://localhost:3000`
+The web frontend application will start on `http://localhost:3000`
 
-### Step 9: Access the Application
+**Terminal 3 - Mobile App (Optional)**:
+
+```bash
+cd pos-mobile
+npm start
+```
+
+This will open Expo DevTools. You can then:
+- Press `i` to open in iOS Simulator
+- Press `a` to open in Android Emulator
+- Scan the QR code with Expo Go app on your physical device
+
+### Step 10: Access the Application
 
 1. Open your web browser and navigate to: `http://localhost:3000`
 2. You should see the Kyla Cafe System landing page
@@ -211,7 +260,7 @@ pos/
 │   ├── package.json
 │   └── .env                    # Environment variables (not in git)
 │
-└── pos-web/                    # Frontend application
+├── pos-web/                    # Web frontend application
     ├── src/
     │   ├── app/                # Next.js app router pages
     │   │   ├── dashboard/     # Dashboard page
@@ -229,6 +278,18 @@ pos/
     ├── public/                 # Static assets
     ├── package.json
     └── .env.local              # Environment variables (not in git)
+│
+└── pos-mobile/                 # Mobile application
+    ├── src/
+    │   ├── components/         # Reusable React components
+    │   ├── lib/               # Utilities and API client
+    │   ├── screens/           # Screen components
+    │   └── types/             # TypeScript type definitions
+    ├── assets/                # Images, fonts, and other static assets
+    ├── App.tsx                # Main app component
+    ├── app.json               # Expo configuration
+    ├── package.json
+    └── .env                   # Environment variables (not in git)
 ```
 
 ## 🔧 Available Scripts
@@ -244,13 +305,22 @@ npm run prisma:generate  # Generate Prisma Client
 npm run prisma:migrate    # Run database migrations
 ```
 
-### Frontend Scripts (`pos-web`)
+### Web Frontend Scripts (`pos-web`)
 
 ```bash
 npm run dev          # Start development server
 npm run build        # Build for production
 npm start            # Start production server
 npm run lint         # Run ESLint
+```
+
+### Mobile App Scripts (`pos-mobile`)
+
+```bash
+npm start            # Start Expo development server
+npm run ios          # Run on iOS Simulator
+npm run android      # Run on Android Emulator
+npm run web          # Run in web browser
 ```
 
 ## 🧪 Testing
@@ -327,6 +397,15 @@ Authorization: Bearer <your-access-token>
     2. Ensure the backend server is running
     3. Check browser console for specific error messages
 
+### Mobile App Can't Connect to Backend
+
+- **Error**: API calls failing or network errors
+  - **Solution**:
+    1. Verify `EXPO_PUBLIC_API_URL` in `pos-mobile/.env` matches your backend URL
+    2. For physical devices, use your computer's IP address instead of `localhost`
+    3. Ensure your phone and computer are on the same Wi-Fi network
+    4. Check that the backend server is running and accessible
+
 ## 📦 Building for Production
 
 ### Backend
@@ -337,12 +416,31 @@ npm run build
 npm start
 ```
 
-### Frontend
+### Web Frontend
 
 ```bash
 cd pos-web
 npm run build
 npm start
+```
+
+### Mobile App
+
+For mobile app builds, refer to the [Expo documentation](https://docs.expo.dev/build/introduction/) for building standalone apps:
+
+```bash
+cd pos-mobile
+# For iOS
+eas build --platform ios
+
+# For Android
+eas build --platform android
+```
+
+Or use Expo's build service:
+```bash
+expo build:ios
+expo build:android
 ```
 
 ## 🔒 Security Notes
